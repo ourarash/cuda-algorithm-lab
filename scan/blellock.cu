@@ -1,30 +1,32 @@
-#include <cmath>
 #include <cuda_runtime.h>
+
+#include <cmath>
 #include <iostream>
 
 // Error checking macro
-#define CUDA_CHECK(ans)                                                        \
+#define CUDA_CHECK(ans) \
   { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line,
                       bool abort = true) {
   if (code != cudaSuccess) {
     std::cerr << "CUDA Error: " << cudaGetErrorString(code) << " at " << file
               << ":" << line << std::endl;
-    if (abort)
-      exit(code);
+    if (abort) exit(code);
   }
 }
 
-// Naive inclusive scan using shared memory, 2 syncthreads per step
+// Blelloch scan using shared memory, 2 syncthreads per step.
+// This is an exclusive scan.
 __global__ void blelloch_scan_shared(float *d_out, const float *d_in, int n) {
-  __shared__ float temp[1024]; // shared buffer for 1 block
+  __shared__ float temp[1024];  // shared buffer for 1 block
   int tid = threadIdx.x;
 
   // Load input into shared memory
-  if (tid < n)
+  if (tid < n) {
     temp[tid] = d_in[tid];
-  else
-    temp[tid] = 0.0f; // fill unused threads with 0
+  } else {
+    temp[tid] = 0.0f;  // fill unused threads with 0
+  }
   __syncthreads();
 
   int offset;
@@ -37,14 +39,16 @@ __global__ void blelloch_scan_shared(float *d_out, const float *d_in, int n) {
     // tree built over an array, where each level of the tree corresponds to a
     // log₂(n) scan step.
     int i = (tid + 1) * offset * 2 - 1;
-    if (i < n)
+    if (i < n) {
       temp[i] += temp[i - offset];
+    }
     __syncthreads();
   }
 
   // Set root to 0 for exclusive scan
-  if (tid == 0)
+  if (tid == 0) {
     temp[n - 1] = 0.0f;
+  }
   __syncthreads();
 
   // Down-Sweep phase
@@ -56,13 +60,13 @@ __global__ void blelloch_scan_shared(float *d_out, const float *d_in, int n) {
     //
     // At Iteration 2, There are two trees (offset = n/4), so i = 1(n/4)*2-1 =
     // n/2-1 and i = 2(n/4)*2-1 = n-1. If n=8, i = 3 and i = 7.
-    int bi = (tid + 1) * offset * 2 - 1; // parent (right) index
-    int ai = bi - offset;                // left child index
+    int bi = (tid + 1) * offset * 2 - 1;  // parent (right) index
+    int ai = bi - offset;                 // left child index
 
     if (bi < n) {
-      float t = temp[ai];  // save old left child
-      temp[ai] = temp[bi]; // move parent value to left
-      temp[bi] += t;       // update right = parent + old left
+      float t = temp[ai];   // save old left child
+      temp[ai] = temp[bi];  // move parent value to left
+      temp[bi] += t;        // update right = parent + old left
     }
 
     __syncthreads();
@@ -77,14 +81,12 @@ __global__ void blelloch_scan_shared(float *d_out, const float *d_in, int n) {
 // CPU inclusive scan (reference)
 void cpu_inclusive_scan(const float *input, float *output, int n) {
   output[0] = input[0];
-  for (int i = 1; i < n; ++i)
-    output[i] = output[i - 1] + input[i];
+  for (int i = 1; i < n; ++i) output[i] = output[i - 1] + input[i];
 }
 
 void cpu_exclusive_scan(const float *input, float *output, int n) {
-  output[0] = 0.0f; // exclusive scan starts with 0
-  for (int i = 1; i < n; ++i)
-    output[i] = output[i - 1] + input[i - 1];
+  output[0] = 0.0f;  // exclusive scan starts with 0
+  for (int i = 1; i < n; ++i) output[i] = output[i - 1] + input[i - 1];
 }
 
 // Compare CPU and GPU output
@@ -130,14 +132,11 @@ int main() {
   cpu_exclusive_scan(h_in, h_ref, n);
 
   std::cout << "Input:  ";
-  for (int i = 0; i < n; i++)
-    std::cout << h_in[i] << " ";
+  for (int i = 0; i < n; i++) std::cout << h_in[i] << " ";
   std::cout << "\nGPU:    ";
-  for (int i = 0; i < n; i++)
-    std::cout << h_out[i] << " ";
+  for (int i = 0; i < n; i++) std::cout << h_out[i] << " ";
   std::cout << "\nCPU Ref:";
-  for (int i = 0; i < n; i++)
-    std::cout << h_ref[i] << " ";
+  for (int i = 0; i < n; i++) std::cout << h_ref[i] << " ";
   std::cout << std::endl;
 
   if (check_equal(h_ref, h_out, n))

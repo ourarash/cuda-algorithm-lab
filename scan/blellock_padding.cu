@@ -19,16 +19,16 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
   }
 }
 
-// Naive inclusive scan using shared memory, 2 syncthreads per step
 __global__ void blelloch_scan_shared(float *d_out, const float *d_in, int n) {
   __shared__ float temp[1024]; // shared buffer for 1 block
   int tid = threadIdx.x;
 
   // Load input into shared memory
-  if (tid < n)
+  if (tid < n) {
     temp[tid] = d_in[tid];
-  else
+  } else {
     temp[tid] = 0.0f; // fill unused threads with 0
+  }
   __syncthreads();
 
   int offset;
