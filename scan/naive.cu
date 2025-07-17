@@ -1,9 +1,9 @@
 #include <cuda_runtime.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <random>
-#include <cstdlib>
 
 // Error checking macro
 #define CUDA_CHECK(ans) \
@@ -29,16 +29,22 @@ __global__ void naive_scan_shared(float *d_out, const float *d_in, int n) {
 
   for (int d = 1; d < n; d *= 2) {
     float val = 0.0f;
-    if (tid >= d && tid < n) val = temp[tid - d];
+    if (tid >= d && tid < n) {
+      val = temp[tid - d];
+    }
 
     __syncthreads();  // Ensure all reads before writes
 
-    if (tid >= d && tid < n) temp[tid] += val;
+    if (tid >= d && tid < n) {
+      temp[tid] += val;
+    }
 
     __syncthreads();  // Ensure all writes before next reads
   }
 
-  if (tid < n) d_out[tid] = temp[tid];
+  if (tid < n) {
+    d_out[tid] = temp[tid];
+  }
 }
 
 // CPU inclusive scan (reference)

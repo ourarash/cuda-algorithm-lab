@@ -7,7 +7,7 @@
 
 // Note that our solution assumes the second scan can be done in a single block!
 // So adjust these numbers accordingly.
-#define N 1024 * 1024     // Size of the input array
+#define N 1024 * 1024    // Size of the input array
 #define BLOCK_SIZE 1024  // Number of threads per block
 
 // Error checking macro
@@ -25,85 +25,40 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 // Naive inclusive scan using shared memory, 2 syncthreads per step
 __global__ void naive_scan_shared(double *d_out, double *partialSums,
                                   const double *d_in, int n) {
-  // // Use blockDim.x instead of the BLOCK_SIZE macro for flexibility
-  // extern __shared__ double temp[];
-  // int tid = threadIdx.x;
-  // int index = blockIdx.x * blockDim.x + tid;
-
-  // // 1. SAFE LOAD: Load data if in bounds, otherwise load 0.0f
-  // // This prevents uninitialized shared memory from corrupting the scan.
-  // double val = (index < n) ? d_in[index] : 0.0f;
-  // temp[tid] = val;
-  // __syncthreads();
-
-  // // The scan logic itself is mostly okay, but we can make it more robust.
-  // // Using blockDim.x makes it independent of the compile-time macro.
-  // for (int d = 1; d < blockDim.x; d *= 2) {
-  //   // We can remove the bounds check (tid < n) inside the loop
-  //   // because we padded with 0.0f, which won't affect the sum.
-  //   val = (tid >= d) ? temp[tid - d] : 0.0f;
-  //   __syncthreads();
-
-  //   if (tid >= d) {
-  //     temp[tid] += val;
-  //   }
-  //   __syncthreads();
-  // }
-
-  // // Write the output for valid threads
-  // if (index < n) {
-  //   d_out[index] = temp[tid];
-  // }
-
-  // // 2. CORRECT PARTIAL SUM: The last thread always holds the correct
-  // // block sum because of the zero-padding.
-  // if (tid == blockDim.x - 1) {
-  //   partialSums[blockIdx.x] = temp[tid];
-  // }
-
+  // Use blockDim.x instead of the BLOCK_SIZE macro for flexibility
   extern __shared__ double temp[];
   int tid = threadIdx.x;
   int index = blockIdx.x * blockDim.x + tid;
 
-  // 1. SAFE LOAD (same as before)
-  temp[tid] = (index < n) ? d_in[index] : 0.0f;
+  // 1. SAFE LOAD: Load data if in bounds, otherwise load 0.0f
+  // This prevents uninitialized shared memory from corrupting the scan.
+  double val = (index < n) ? d_in[index] : 0.0f;
+  temp[tid] = val;
   __syncthreads();
 
-  // 2. UP-SWEEP (Reduction Phase)
-  // Build a sum tree in shared memory
+  // The scan logic itself is mostly okay, but we can make it more robust.
+  // Using blockDim.x makes it independent of the compile-time macro.
   for (int d = 1; d < blockDim.x; d *= 2) {
-    if (tid % (2 * d) == (2 * d - 1)) {
-      temp[tid] += temp[tid - d];
+    // We can remove the bounds check (tid < n) inside the loop
+    // because we padded with 0.0f, which won't affect the sum.
+    val = (tid >= d) ? temp[tid - d] : 0.0f;
+    __syncthreads();
+
+    if (tid >= d) {
+      temp[tid] += val;
     }
     __syncthreads();
   }
 
-  // 3. The last element now holds the total sum for the block
-  if (tid == blockDim.x - 1) {
-    // Save the sum for the next level scan
-    if (partialSums) {
-      partialSums[blockIdx.x] = temp[tid];
-    }
-    // Clear the last element for the down-sweep
-    temp[tid] = 0.0f;
-  }
-  __syncthreads();
-
-  // 4. DOWN-SWEEP (Distribution Phase)
-  // Traverse down the tree, distributing partial sums
-  for (int d = blockDim.x / 2; d > 0; d /= 2) {
-    if (tid % (2 * d) == (2 * d - 1)) {
-      double t = temp[tid - d];
-      temp[tid - d] = temp[tid];
-      temp[tid] += t;
-    }
-    __syncthreads();
-  }
-
-  // Write the final (inclusive) result
+  // Write the output for valid threads
   if (index < n) {
-    // The result is an exclusive scan; add the original value for inclusive
-    d_out[index] = temp[tid] + ((index < n) ? d_in[index] : 0.0f);
+    d_out[index] = temp[tid];
+  }
+
+  // 2. CORRECT PARTIAL SUM: The last thread always holds the correct
+  // block sum because of the zero-padding.
+  if (tid == blockDim.x - 1) {
+    partialSums[blockIdx.x] = temp[tid];
   }
 }
 // CPU inclusive scan (reference)
@@ -159,7 +114,8 @@ int main() {
 
   double *d_in = nullptr;
   CUDA_CHECK(cudaMalloc(&d_in, N * sizeof(double)));
-  CUDA_CHECK(cudaMemcpy(d_in, h_in, N * sizeof(double), cudaMemcpyHostToDevice));
+  CUDA_CHECK(
+      cudaMemcpy(d_in, h_in, N * sizeof(double), cudaMemcpyHostToDevice));
 
   double *d_out = nullptr;
   CUDA_CHECK(cudaMalloc(&d_out, N * sizeof(double)));
