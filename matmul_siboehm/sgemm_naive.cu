@@ -1,20 +1,21 @@
+#include <cuda_runtime.h>
+
 #include <cassert>
 #include <cmath>
-#include <cuda_runtime.h>
 #include <iostream>
 #include <vector>
 
-#define CHECK(call)                                                            \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "     \
-                << cudaGetErrorString(err) << std::endl;                       \
-      exit(1);                                                                 \
-    }                                                                          \
+#define CHECK(call)                                                        \
+  do {                                                                     \
+    cudaError_t err = call;                                                \
+    if (err != cudaSuccess) {                                              \
+      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": " \
+                << cudaGetErrorString(err) << std::endl;                   \
+      exit(1);                                                             \
+    }                                                                      \
   } while (0)
 
-#define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
+#define CEIL_DIV(x, y) (((x) + (y) - 1) / (y))
 
 // Threads in warp change
 __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A,
@@ -33,7 +34,7 @@ __global__ void sgemm_naive(int M, int N, int K, float alpha, const float *A,
   if (i < M && j < N) {
     float tmp = 0.0;
     for (int k = 0; k < K; ++k) {
-      tmp += A[i * K + k] * B[k * N + j]; // A[i, k] * B[k, j]
+      tmp += A[i * K + k] * B[k * N + j];  // A[i, k] * B[k, j]
     }
     // C = α*(A@B)+β*C
     // C[i, j] = α * tmp + β * C[i, j];
@@ -46,8 +47,7 @@ void cpu_gemm(int M, int N, int K, float alpha, const float *A, const float *B,
   for (int x = 0; x < M; ++x)
     for (int y = 0; y < N; ++y) {
       float tmp = 0.0f;
-      for (int i = 0; i < K; ++i)
-        tmp += A[x * K + i] * B[i * N + y];
+      for (int i = 0; i < K; ++i) tmp += A[x * K + i] * B[i * N + y];
       C[x * N + y] = alpha * tmp + beta * C[x * N + y];
     }
 }
@@ -63,16 +63,14 @@ int main() {
             << "\n";
   std::cout << "Max blocks per SM: " << prop.maxBlocksPerMultiProcessor << "\n";
 
-  const int M = 1024, N = 1024, K = 1024;
-  const int BLOCK_SIZE = 32; // Block size for the kernel
+  const int M = 100, N = 100, K = 100;
+  const int BLOCK_SIZE = 32;  // Block size for the kernel
   float alpha = 1.0f, beta = 0.0f;
 
   std::vector<float> A(M * K), B(K * N), C_cpu(M * N), C_gpu(M * N);
 
-  for (int i = 0; i < M * K; ++i)
-    A[i] = static_cast<float>(i % 13);
-  for (int i = 0; i < K * N; ++i)
-    B[i] = static_cast<float>((i % 7) - 3);
+  for (int i = 0; i < M * K; ++i) A[i] = static_cast<float>(i % 13);
+  for (int i = 0; i < K * N; ++i) B[i] = static_cast<float>((i % 7) - 3);
   for (int i = 0; i < M * N; ++i) {
     C_cpu[i] = 1.0f;
     C_gpu[i] = 1.0f;
@@ -108,9 +106,24 @@ int main() {
   dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE, 1);
   // launch the asynchronous execution of the kernel on the device
   // The function call returns immediately on the host
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  cudaEventRecord(start);
   sgemm_naive<<<gridDim, blockDim>>>(M, N, K, alpha, dA, dB, beta, dC);
-  CHECK(cudaGetLastError()); // Check for kernel launch errors
-  CHECK(cudaDeviceSynchronize());
+  cudaEventRecord(stop);
+
+  CHECK(cudaGetLastError());
+  CHECK(cudaEventSynchronize(stop));  // ✅ This is the correct sync point
+
+  float ms = 0.0f;
+  cudaEventElapsedTime(&ms, start, stop);
+
+  cudaEventDestroy(start);
+  cudaEventDestroy(stop);
+
+  std::cout << "Kernel execution time: " << ms << " ms\n";
 
   CHECK(cudaMemcpy(C_gpu.data(), dC, C_gpu.size() * sizeof(float),
                    cudaMemcpyDeviceToHost));
