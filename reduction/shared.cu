@@ -5,6 +5,9 @@
 #include <random>
 
 #define BLOCK_SIZE 256  // Number of threads per block
+// Number of segments per thread block, i.e., how many input segments each
+// thread block will process.
+#define INPUT_SEGMENTS_PER_THREAD_BLOCK 4
 
 #define CHECK_CUDA(call)                                                       \
   do {                                                                         \
@@ -30,15 +33,26 @@ bool float_equal(float a, float b, float eps = 1e-5f) {
 
 __global__ void reduction(float *input, float *partialSums, unsigned int N) {
   unsigned int tid = threadIdx.x;
-  unsigned int i = blockIdx.x * blockDim.x * 2 + tid;
+  unsigned int i =
+      blockIdx.x * blockDim.x * INPUT_SEGMENTS_PER_THREAD_BLOCK + tid;
 
   __shared__ float sharedData[BLOCK_SIZE];
 
-  float val1 = (i < N) ? input[i] : 0.0f;
-  float val2 = (i + blockDim.x < N) ? input[i + blockDim.x] : 0.0f;
-  sharedData[tid] = val1 + val2;
+  sharedData[tid] = 0.0f;
+#pragma unroll
+  // Each thread processes multiple segments of the input array.
+  // This increases the amount of data processed per thread block,
+  // improving memory coalescing and reducing the number of kernel launches.
+  for (int j = 0; j < INPUT_SEGMENTS_PER_THREAD_BLOCK; ++j) {
+    if (i + j * blockDim.x < N) {
+      sharedData[tid] += input[i + j * blockDim.x];
+    }
+  }
+
   __syncthreads();
 
+// Perform reduction within the block using a tree-based approach.
+#pragma unroll
   for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
     if (tid < stride) {
       sharedData[tid] += sharedData[tid + stride];
@@ -51,23 +65,48 @@ __global__ void reduction(float *input, float *partialSums, unsigned int N) {
   }
 }
 
-// We use Kahan summation to reduce numerical errors in floating-point addition.
-float CpuReduction(float *input, int n) {
-  float sum = 0.0f;
-  float c = 0.0f;  // A running compensation for lost low-order bits.
+/**
+ * @brief Accurately sums an array of floating-point numbers using the Kahan
+ * summation algorithm.
+ * * This method minimizes floating-point error by tracking a running
+ * compensation for the low-order bits that are lost during addition.
+ * * @param input An array of floats to be summed.
+ * @param n The number of elements in the array.
+ * @return The highly accurate sum of the elements.
+ */
+float KahanSummation(float *input, int n) {
+  // The main accumulator, which holds the running total.
+  // Prone to precision errors when adding small numbers.
+  float runningSum = 0.0f;
+
+  // Stores the accumulated error from previous additions.
+  // This is the "lost" part that we'll re-incorporate later.
+  float errorCorrection = 0.0f;
 
   for (int i = 0; i < n; i++) {
-    float y = input[i] - c;  // Subtract the error from the last addition.
-    float t = sum + y;       // Add the corrected value to the sum.
-    c = (t - sum) - y;  // Calculate the new error. This recovers the part of
-                        // 'y' that was lost.
-    sum = t;            // Update the sum.
+    // 1. Compensate: Adjust the next input value by subtracting the error
+    //    that was calculated in the previous iteration.
+    float compensatedInput = input[i] - errorCorrection;
+
+    // 2. Add: Add the compensated value to our main running sum.
+    //    This is where precision can be lost.
+    float newSum = runningSum + compensatedInput;
+
+    // 3. Capture Error: Calculate the new error. This is the crucial step.
+    //    It recovers the part of 'compensatedInput' that was lost when adding
+    //    to 'runningSum'.
+    errorCorrection = (newSum - runningSum) - compensatedInput;
+
+    // 4. Update: Set the running sum to our new, albeit imprecise, total.
+    //    The error has been safely stored for the next loop.
+    runningSum = newSum;
   }
-  return sum;
+
+  return runningSum;
 }
 
 float LaunchReduction(float *input, float *partialSums, int n) {
-  int numBlocks = ceil_div(n, (2 * BLOCK_SIZE));
+  int numBlocks = ceil_div(n, (INPUT_SEGMENTS_PER_THREAD_BLOCK * BLOCK_SIZE));
 
   float elapsed_time_ms = 0.0f;
   cudaEvent_t start, stop;
@@ -96,7 +135,7 @@ float LaunchReduction(float *input, float *partialSums, int n) {
 int main() {
   // Example usage of the reduction function
   const int N = 1024 * 1024;
-  int numBlocks = ceil_div(N, (2 * BLOCK_SIZE));
+  int numBlocks = ceil_div(N, (INPUT_SEGMENTS_PER_THREAD_BLOCK * BLOCK_SIZE));
 
   // Allocate device and host memory for input data.
   float *d_input, *h_input;
@@ -137,7 +176,7 @@ int main() {
   printf("Final reduction result: %f\n", finalSum);
 
   // Perform CPU reduction for verification
-  float cpu_result = CpuReduction(h_input, N);
+  float cpu_result = KahanSummation(h_input, N);
   printf("CPU Reduction result: %f\n", cpu_result);
 
   // Check if results match
