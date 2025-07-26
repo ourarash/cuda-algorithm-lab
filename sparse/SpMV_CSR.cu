@@ -16,20 +16,28 @@
   } while (0)
 
 template <typename T>
-class CooMatrix {
+class CSRMatrix {
  public:
-  std::vector<int> rowInd;
+  std::vector<int> rowPtr;
   std::vector<int> colInd;
   std::vector<T> values;
 
-  CooMatrix(const std::vector<std::vector<T>>& denseMatrix) {
-    denseToCOO(denseMatrix, rowInd, colInd, values);
+  CSRMatrix(const std::vector<std::vector<T>>& denseMatrix) {
+    denseToCSR(denseMatrix, rowPtr, colInd, values);
+  }
+  T get(int row, int col) const {
+    for (int j = rowPtr[row]; j < rowPtr[row + 1]; ++j) {
+      if (colInd[j] == col) {
+        return values[j];
+      }
+    }
+    return T(0);  // Return zero if no value found
   }
 
-  void denseToCOO(const std::vector<std::vector<T>>& denseMatrix,
-                  std::vector<int>& rowInd, std::vector<int>& colInd,
+  void denseToCSR(const std::vector<std::vector<T>>& denseMatrix,
+                  std::vector<int>& rowPtr, std::vector<int>& colInd,
                   std::vector<T>& values) {
-    rowInd.clear();
+    rowPtr.clear();
     colInd.clear();
     values.clear();
 
@@ -39,31 +47,16 @@ class CooMatrix {
     }
     int numCols = denseMatrix[0].size();
 
+    rowPtr.push_back(0);
     for (int i = 0; i < numRows; ++i) {
       for (int j = 0; j < numCols; ++j) {
         if (denseMatrix[i][j] != T(0)) {
-          rowInd.push_back(i);
           colInd.push_back(j);
           values.push_back(denseMatrix[i][j]);
         }
       }
+      rowPtr.push_back(colInd.size());
     }
-  }
-
-  std::vector<std::vector<T>> CooToDense(const std::vector<int>& rowInd,
-                                         const std::vector<int>& colInd,
-                                         const std::vector<T>& values,
-                                         int numRows, int numCols) {
-    std::vector<std::vector<T>> denseMatrix(numRows,
-                                            std::vector<T>(numCols, T(0)));
-
-    for (size_t i = 0; i < rowInd.size(); ++i) {
-      int row = rowInd[i];
-      int col = colInd[i];
-      denseMatrix[row][col] = values[i];
-    }
-
-    return denseMatrix;
   }
 };
 
@@ -89,20 +82,18 @@ std::vector<float> initializeVector(int size, float value = 0.1f) {
   return std::vector<float>(size, value);
 }
 
-// We assign one thread per non-zero item.
-// Each thread computes the contribution of one non-zero item to the output vector.
-// The output vector is updated using atomic operations to ensure correctness
-// in the presence of concurrent writes from multiple threads.
-__global__ void SpMV_kernel(int numRows, int numCols, int numNonZero,
-                            const int* rowInd, const int* colInd,
-                            const float* values, const float* in_vec,
-                            float* out_vec) {
-  int none_zero_item_index = blockIdx.x * blockDim.x + threadIdx.x;
+// We assign one thread per row.
+__global__ void SpMV_kernel(int numRows, int numNonZero, const int* rowInd,
+                            const int* colInd, const float* values,
+                            const float* in_vec, float* out_vec) {
+  int row = blockIdx.x * blockDim.x + threadIdx.x;
 
-  if (none_zero_item_index < numNonZero) {
-    int row = rowInd[none_zero_item_index];
-    int col = colInd[none_zero_item_index];
-    atomicAdd(&out_vec[row], values[none_zero_item_index] * in_vec[col]);
+  if (row < numRows) {
+    float sum = 0.0f;
+    for (int j = rowInd[row]; j < rowInd[row + 1]; ++j) {
+      sum += values[j] * in_vec[colInd[j]];
+    }
+    out_vec[row] = sum;
   }
 }
 
@@ -110,16 +101,16 @@ __global__ void SpMV_kernel(int numRows, int numCols, int numNonZero,
 
 void SpMV_gpu(const std::vector<std::vector<float>>& denseMatrix,
               const std::vector<float>& in_vec, std::vector<float>& out_vec) {
-  CooMatrix<float> cooMatrix(denseMatrix);
+  CSRMatrix<float> csrMatrix(denseMatrix);
 
   float *d_in_vec, *d_out_vec;
-  int *d_rowInd, *d_colInd;
+  int *d_rowPtr, *d_colInd;
   float* d_values;
   CHECK(cudaMalloc(&d_in_vec, in_vec.size() * sizeof(float)));
   CHECK(cudaMalloc(&d_out_vec, denseMatrix.size() * sizeof(float)));
-  CHECK(cudaMalloc(&d_rowInd, cooMatrix.rowInd.size() * sizeof(int)));
-  CHECK(cudaMalloc(&d_colInd, cooMatrix.colInd.size() * sizeof(int)));
-  CHECK(cudaMalloc(&d_values, cooMatrix.values.size() * sizeof(float)));
+  CHECK(cudaMalloc(&d_rowPtr, csrMatrix.rowPtr.size() * sizeof(int)));
+  CHECK(cudaMalloc(&d_colInd, csrMatrix.colInd.size() * sizeof(int)));
+  CHECK(cudaMalloc(&d_values, csrMatrix.values.size() * sizeof(float)));
 
   CHECK(cudaMemcpy(d_in_vec, in_vec.data(), in_vec.size() * sizeof(float),
                    cudaMemcpyHostToDevice));
@@ -127,27 +118,27 @@ void SpMV_gpu(const std::vector<std::vector<float>>& denseMatrix,
   // Initialize output vector to zero
   CHECK(cudaMemset(d_out_vec, 0, denseMatrix.size() * sizeof(float)));
 
-  CHECK(cudaMemcpy(d_rowInd, cooMatrix.rowInd.data(),
-                   cooMatrix.rowInd.size() * sizeof(int),
+  CHECK(cudaMemcpy(d_rowPtr, csrMatrix.rowPtr.data(),
+                   csrMatrix.rowPtr.size() * sizeof(int),
                    cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(d_colInd, cooMatrix.colInd.data(),
-                   cooMatrix.colInd.size() * sizeof(int),
+  CHECK(cudaMemcpy(d_colInd, csrMatrix.colInd.data(),
+                   csrMatrix.colInd.size() * sizeof(int),
                    cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(d_values, cooMatrix.values.data(),
-                   cooMatrix.values.size() * sizeof(float),
+  CHECK(cudaMemcpy(d_values, csrMatrix.values.data(),
+                   csrMatrix.values.size() * sizeof(float),
                    cudaMemcpyHostToDevice));
 
-  int numNonZero = cooMatrix.values.size();
-  SpMV_kernel<<<(numNonZero + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
-      denseMatrix.size(), denseMatrix[0].size(), numNonZero, d_rowInd, d_colInd,
-      d_values, d_in_vec, d_out_vec);
+  int numNonZero = csrMatrix.values.size();
+  SpMV_kernel<<<(denseMatrix.size() + BLOCK_SIZE - 1) / BLOCK_SIZE,
+                BLOCK_SIZE>>>(denseMatrix.size(), numNonZero, d_rowPtr,
+                              d_colInd, d_values, d_in_vec, d_out_vec);
 
   CHECK(cudaDeviceSynchronize());
   CHECK(cudaMemcpy(out_vec.data(), d_out_vec,
                    denseMatrix.size() * sizeof(float), cudaMemcpyDeviceToHost));
   CHECK(cudaFree(d_in_vec));
   CHECK(cudaFree(d_out_vec));
-  CHECK(cudaFree(d_rowInd));
+  CHECK(cudaFree(d_rowPtr));
   CHECK(cudaFree(d_colInd));
   CHECK(cudaFree(d_values));
 }
