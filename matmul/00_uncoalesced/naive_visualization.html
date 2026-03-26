@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA SGEMM: Ultimate Memory Pattern Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Add MathJax for LaTeX rendering -->
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        .matrix-grid { display: grid; gap: 2px; }
+        .cell {
+            aspect-ratio: 1/1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            border-radius: 2px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            position: relative;
+        }
+        .cell-a { background-color: #fee2e2; border: 1px solid #fecaca; }
+        .cell-b { background-color: #dcfce7; border: 1px solid #bbf7d0; }
+        .cell-c { background-color: #dbeafe; border: 1px solid #bfdbfe; }
+        
+        .active-a { background-color: #ef4444 !important; color: white; transform: scale(1.1); z-index: 10; box-shadow: 0 0 8px rgba(239, 68, 68, 0.5); }
+        .active-b { background-color: #22c55e !important; color: white; transform: scale(1.1); z-index: 10; box-shadow: 0 0 8px rgba(34, 197, 94, 0.5); }
+        .active-c { background-color: #3b82f6 !important; color: white; transform: scale(1.05); outline: 2px solid #2563eb; }
+        
+        .warp-active-a { background-color: #fca5a5 !important; border-color: #ef4444; opacity: 0.8; }
+        .warp-active-b { background-color: #86efac !important; border-color: #22c55e; opacity: 0.8; }
+        .warp-active-c { background-color: #93c5fd !important; border-color: #3b82f6; opacity: 0.8; }
+        
+        .code-highlight { background-color: rgba(59, 130, 246, 0.2); border-left: 4px solid #3b82f6; }
+
+        .mem-ribbon {
+            display: flex;
+            gap: 1px;
+            background: #e2e8f0;
+            padding: 2px;
+            border-radius: 4px;
+            overflow-x: auto;
+            height: 24px;
+        }
+        .mem-byte {
+            min-width: 10px;
+            height: 100%;
+            background: white;
+            border-radius: 1px;
+            transition: background 0.3s;
+        }
+        .mem-byte.active-read { background: #22c55e !important; box-shadow: 0 0 5px #22c55e; }
+        .mem-byte.active-strided { background: #ef4444 !important; box-shadow: 0 0 5px #ef4444; }
+        .mem-byte.active-write { background: #3b82f6 !important; box-shadow: 0 0 5px #3b82f6; }
+
+        @keyframes math-pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.2); filter: brightness(1.2); }
+            100% { transform: scale(1); }
+        }
+        .math-anim { animation: math-pulse 0.4s ease-out; }
+        
+        .code-container { max-height: 400px; overflow-y: auto; }
+        
+        .badge-coalesced { background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+        .badge-broadcast { background-color: #fef9c3; color: #854d0e; border: 1px solid #fef08a; }
+        .badge-strided { background-color: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-8 font-sans">
+
+    <div class="max-w-7xl mx-auto">
+        <header class="mb-6 flex flex-wrap justify-between items-end gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-slate-800">SGEMM: Ultimate Memory Visualizer</h1>
+                <p class="text-slate-600">Explore <strong>SIMT Parallelism</strong> and DRAM transaction efficiency.</p>
+            </div>
+            <div class="flex gap-4 items-center">
+                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 flex gap-6">
+                    <div class="text-right">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">DRAM Transactions</div>
+                        <div id="transactionCount" class="text-xl font-mono font-bold text-blue-600">0</div>
+                    </div>
+                    <div class="text-right border-l pl-6">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">Effective Bandwidth</div>
+                        <div id="bandwidthUtil" class="text-xl font-mono font-bold text-green-600">0%</div>
+                    </div>
+                </div>
+                <div class="bg-white p-1.5 rounded-xl shadow-sm border border-slate-200 flex gap-1">
+                    <button id="modeCoalesced" class="px-4 py-2 rounded-lg text-sm font-bold transition-all bg-blue-600 text-white shadow-md">Coalesced Mode</button>
+                    <button id="modeNonCoalesced" class="px-4 py-2 rounded-lg text-sm font-bold transition-all bg-slate-100 text-slate-600 hover:bg-slate-200">Non-Coalesced Mode</button>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <div class="lg:col-span-4 space-y-4">
+                <!-- Controls -->
+                <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="font-bold text-slate-700 uppercase text-xs tracking-wider">Execution Controls</h2>
+                        <div id="phaseIndicator" class="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-widest">Init</div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-2 mb-4">
+                        <button id="playPauseBtn" class="bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2">
+                            <span id="playIcon">▶ Play</span>
+                        </button>
+                        <button id="stepBtn" class="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 rounded-lg font-bold text-sm border shadow-sm">Step K</button>
+                    </div>
+
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase">
+                            <span>Animation Speed</span>
+                            <span id="speedVal">500ms</span>
+                        </div>
+                        <input type="range" id="speedSlider" min="50" max="1500" value="500" class="w-full">
+                        <label class="inline-flex items-center cursor-pointer w-full justify-between bg-slate-50 p-2 rounded border">
+                            <span class="text-xs font-bold text-slate-600">Parallel Warp View</span>
+                            <input type="checkbox" id="warpMode" class="sr-only peer" checked>
+                            <div class="relative w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+                        </label>
+                        <button id="resetBtn" class="w-full text-center text-xs text-slate-400 hover:text-slate-600 underline font-medium">Reset Sim to (0,0)</button>
+                    </div>
+                </div>
+
+                <!-- Code -->
+                <div class="bg-slate-900 text-slate-300 p-4 rounded-xl shadow-lg font-mono text-[10px] code-container border border-slate-700">
+                    <div id="codeComment" class="text-blue-400 font-bold mb-1">// Mapping: Coalesced</div>
+                    <div id="codeJ">const uint j = blockIdx.x * bDim.x + tIdx.x;</div>
+                    <div id="codeI">const uint i = blockIdx.y * bDim.y + tIdx.y;</div>
+                    <div class="h-2"></div>
+                    <div id="line-for" class="rounded px-1 transition">for (int k = 0; k < K; ++k) {</div>
+                    <div id="line-math" class="rounded px-1 ml-4 transition text-red-300">  tmp += A[i*K+k] * B[k*N+j];</div>
+                    <div class="rounded px-1 ml-2">}</div>
+                    <div id="line-store" class="rounded px-1 ml-2 transition text-blue-300">C[i*N+j] = tmp + C[i*N+j];</div>
+                </div>
+            </div>
+
+            <!-- Main Matrices -->
+            <div class="lg:col-span-8 space-y-6">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                    <div class="grid grid-cols-2 gap-8">
+                        <div class="flex flex-col items-center">
+                            <span class="text-[10px] font-bold text-red-500 uppercase tracking-widest mb-1">Matrix A (6 × 6)</span>
+                            <div class="flex items-center gap-2 mb-2">
+                                <span id="badgeA" class="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase">Broadcast</span>
+                            </div>
+                            <div id="gridA" class="matrix-grid"></div>
+                        </div>
+                        <div class="flex flex-col items-center">
+                            <span class="text-[10px] font-bold text-green-500 uppercase tracking-widest mb-1">Matrix B (6 × 8)</span>
+                            <div class="flex items-center gap-2 mb-2">
+                                <span id="badgeB" class="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase">Coalesced</span>
+                            </div>
+                            <div id="gridB" class="matrix-grid"></div>
+                        </div>
+                        <div class="col-span-2 flex flex-col items-center pt-4 border-t border-slate-100">
+                            <span class="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-1">Matrix C (6 × 8)</span>
+                            <div class="text-lg font-bold text-blue-600 mb-2">Thread Computing Result</div>
+                            <div id="gridC" class="matrix-grid"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 1D DRAM Ribbons -->
+                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4">
+                    <h3 class="text-xs font-bold text-slate-500 uppercase border-b pb-2 tracking-widest">Global Memory (DRAM) Layout & Bandwidth</h3>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 items-start">
+                        <div class="md:col-span-3 space-y-3">
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[10px] font-bold text-red-400"><span>A-DRAM (Row-Major)</span></div>
+                                <div id="memRibbonA" class="mem-ribbon"></div>
+                            </div>
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[10px] font-bold text-green-500"><span>B-DRAM (Row-Major)</span></div>
+                                <div id="memRibbonB" class="mem-ribbon"></div>
+                            </div>
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[10px] font-bold text-blue-500"><span>C-DRAM (Row-Major)</span></div>
+                                <div id="memRibbonC" class="mem-ribbon"></div>
+                            </div>
+                        </div>
+                        <div class="bg-slate-50 p-4 rounded-lg border border-slate-100 flex flex-col items-center justify-center">
+                            <div class="text-[10px] font-bold text-slate-400 uppercase mb-2 text-center">Bus Utilization</div>
+                            <div class="relative w-20 h-20 mb-2">
+                                <svg class="w-full h-full" viewBox="0 0 36 36">
+                                    <path class="text-slate-200" stroke-dasharray="100, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-width="3"></path>
+                                    <path id="bandwidthCircle" class="text-blue-500 transition-all duration-500" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" stroke-width="3"></path>
+                                </svg>
+                                <div id="bandwidthPercent" class="absolute inset-0 flex items-center justify-center text-xs font-black text-slate-700">0%</div>
+                            </div>
+                            <div id="bandwidthBreakdown" class="text-[9px] text-slate-500 font-mono text-center">
+                                Useful: 0B<br>Moved: 0B
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- New Explanation Section -->
+                    <div class="mt-6 border-t pt-4 space-y-4">
+                        <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                            <h4 class="text-xs font-bold text-slate-800 uppercase mb-2 tracking-tight">Memory Analysis Deep Dive</h4>
+                            
+                            <div class="space-y-4 text-[12px] text-slate-700 leading-relaxed">
+                                <div>
+                                    <p class="font-bold text-slate-900 mb-1">Why is utilization 50% in Coalesced Mode?</p>
+                                    <p>
+                                        In the current simulation logic, for every "Load" step, a 4-thread Warp performs 8 useful float loads (4 threads \(\times\) 2 matrices). At 4 bytes per float, that is 32 bytes of useful data. To get this data, the hardware performs 2 transactions (1 for Matrix A, 1 for Matrix B). Since each transaction moves a 32-byte segment, the total data moved is 64 bytes.
+                                    </p>
+                                    <div class="my-3 py-2 bg-white rounded border border-slate-200 text-center font-mono text-blue-700">
+                                        \[\text{Utilization} = \frac{32 \text{ useful bytes}}{64 \text{ total bytes moved}} = 50\%\]
+                                    </div>
+                                    <p class="text-[11px] italic text-slate-500">
+                                        Note: Matrix B is perfectly coalesced (4 items used), but Matrix A is broadcast (1 item used by all), meaning the DRAM segment for A is highly underutilized.
+                                    </p>
+                                </div>
+
+                                <div class="border-t pt-3">
+                                    <p class="font-bold text-slate-900 mb-1">Are we assuming each transaction reads four items?</p>
+                                    <p>
+                                        No, we are assuming each transaction moves a 32-byte segment. Since a float is 4 bytes, each transaction actually moves 8 floats. Because our "Warp" is only 4 threads wide, even a "perfectly coalesced" access only uses 4 out of the 8 floats in that segment (50% of that specific transaction's capacity).
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 text-[11px] bg-blue-50 p-3 rounded-lg border border-blue-100">
+                        <div class="space-y-1">
+                            <div class="font-bold text-blue-800 uppercase tracking-tighter">Summary</div>
+                            <div id="efficiencyMetric" class="font-black text-blue-700 uppercase italic">Bus Efficiency: 100%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Thread Monitor -->
+                <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                    <div class="bg-slate-800 text-white px-4 py-2 flex justify-between items-center">
+                        <h3 class="text-sm font-bold">Execution Monitor</h3>
+                        <span id="simtBadge" class="text-[10px] bg-blue-500 px-2 py-0.5 rounded uppercase font-bold">Parallel SIMT</span>
+                    </div>
+                    <div class="p-0 overflow-x-auto">
+                        <table class="w-full text-left text-[11px]">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-bold">
+                                    <th class="px-4 py-2">Warp Lane</th>
+                                    <th class="px-4 py-2">Global TID</th>
+                                    <th class="px-4 py-2">Coord (i, j)</th>
+                                    <th class="px-4 py-2">Read A (Type)</th>
+                                    <th class="px-4 py-2">Read B (Type)</th>
+                                    <th class="px-4 py-2">Private tmp</th>
+                                </tr>
+                            </thead>
+                            <tbody id="warpTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const M = 6, K = 6, N = 8;
+        let totalTransactions = 0;
+        let usefulLoads = 0;
+        let state = {
+            iBase: 0, jBase: 0, focusIdx: 0, k: 0,
+            isPlaying: false, speed: 500, warpMode: true,
+            isCoalesced: true, stepPhase: 'init' 
+        };
+
+        const matrixData = {
+            A: [], B: [], 
+            C_initial: Array(M).fill(0).map(() => Array(N).fill(0).map(() => Math.floor(Math.random() * 5))),
+            C_current: [],
+            warpTmps: [0, 0, 0, 0] 
+        };
+        matrixData.C_current = JSON.parse(JSON.stringify(matrixData.C_initial));
+
+        function initDRAM() {
+            const ribbons = {
+                A: { el: document.getElementById('memRibbonA'), size: M * K },
+                B: { el: document.getElementById('memRibbonB'), size: K * N },
+                C: { el: document.getElementById('memRibbonC'), size: M * N }
+            };
+
+            Object.keys(ribbons).forEach(key => {
+                const ribbon = ribbons[key];
+                if (!ribbon.el) return;
+                ribbon.el.innerHTML = '';
+                for (let i = 0; i < ribbon.size; i++) {
+                    const b = document.createElement('div');
+                    b.className = 'mem-byte';
+                    b.id = `mem-${key.toLowerCase()}-${i}`;
+                    ribbon.el.appendChild(b);
+                }
+            });
+        }
+
+        function initGrids() {
+            const grids = { A: document.getElementById('gridA'), B: document.getElementById('gridB'), C: document.getElementById('gridC') };
+            if (!grids.A) return;
+            Object.values(grids).forEach(g => g.innerHTML = '');
+            
+            grids.A.style.gridTemplateColumns = `repeat(${K}, 1fr)`;
+            for (let r = 0; r < M; r++) {
+                matrixData.A[r] = [];
+                for (let c = 0; c < K; c++) {
+                    const val = Math.floor(Math.random() * 10);
+                    matrixData.A[r][c] = val;
+                    grids.A.appendChild(createCell('a', r, c, val));
+                }
+            }
+
+            grids.B.style.gridTemplateColumns = `repeat(${N}, 1fr)`;
+            for (let r = 0; r < K; r++) {
+                matrixData.B[r] = [];
+                for (let c = 0; c < N; c++) {
+                    const val = Math.floor(Math.random() * 10);
+                    matrixData.B[r][c] = val;
+                    grids.B.appendChild(createCell('b', r, c, val));
+                }
+            }
+
+            grids.C.style.gridTemplateColumns = `repeat(${N}, 1fr)`;
+            for (let r = 0; r < M; r++) {
+                for (let c = 0; c < N; c++) {
+                    const cell = createCell('c', r, c, matrixData.C_current[r][c]);
+                    cell.onclick = () => {
+                        if (state.isCoalesced) {
+                            state.iBase = r; state.jBase = Math.floor(c / 4) * 4; state.focusIdx = c % 4;
+                        } else {
+                            state.iBase = Math.floor(r / 4) * 4; state.jBase = c; state.focusIdx = r % 4;
+                        }
+                        resetLocal(); updateUI();
+                    };
+                    grids.C.appendChild(cell);
+                }
+            }
+        }
+
+        function createCell(type, r, c, val) {
+            const div = document.createElement('div');
+            div.className = `cell cell-${type} w-6 h-6 md:w-8 md:h-8`;
+            div.id = `${type}-${r}-${c}`;
+            div.textContent = val;
+            return div;
+        }
+
+        function updateUI() {
+            document.querySelectorAll('.cell').forEach(c => c.classList.remove('active-a', 'active-b', 'active-c', 'warp-active-a', 'warp-active-b', 'warp-active-c', 'math-anim'));
+            document.querySelectorAll('.mem-byte').forEach(b => b.classList.remove('active-read', 'active-strided', 'active-write'));
+            document.querySelectorAll('[id^="line-"]').forEach(l => l.classList.remove('code-highlight'));
+            document.getElementById('codeJ')?.classList.remove('code-highlight');
+            document.getElementById('codeI')?.classList.remove('code-highlight');
+            
+            const { iBase, jBase, focusIdx, k, stepPhase, warpMode, isCoalesced } = state;
+
+            const badgeA = document.getElementById('badgeA');
+            const badgeB = document.getElementById('badgeB');
+            if (isCoalesced) {
+                if (badgeA) { badgeA.textContent = 'A: Broadcast'; badgeA.className = 'px-2 py-0.5 rounded-full text-[9px] font-bold uppercase badge-broadcast'; }
+                if (badgeB) { badgeB.textContent = 'B: Coalesced'; badgeB.className = 'px-2 py-0.5 rounded-full text-[9px] font-bold uppercase badge-coalesced'; }
+            } else {
+                if (badgeA) { badgeA.textContent = 'A: Strided'; badgeA.className = 'px-2 py-0.5 rounded-full text-[9px] font-bold uppercase badge-strided'; }
+                if (badgeB) { badgeB.textContent = 'B: Broadcast'; badgeB.className = 'px-2 py-0.5 rounded-full text-[9px] font-bold uppercase badge-broadcast'; }
+            }
+
+            const comment = document.getElementById('codeComment');
+            if (comment) comment.textContent = isCoalesced ? "// Mapping: Coalesced (Efficient)" : "// Mapping: Strided (Performance Loss)";
+            const cj = document.getElementById('codeJ'); if (cj) cj.textContent = isCoalesced ? "const uint j = blockIdx.x * bDim.x + tIdx.x;" : "const uint j = blockIdx.y * bDim.y + tIdx.y;";
+            const ci = document.getElementById('codeI'); if (ci) ci.textContent = isCoalesced ? "const uint i = blockIdx.y * bDim.y + tIdx.y;" : "const uint i = blockIdx.x * bDim.x + tIdx.x;";
+
+            if (stepPhase === 'init') {
+                document.getElementById('codeJ')?.classList.add('code-highlight');
+                document.getElementById('codeI')?.classList.add('code-highlight');
+            }
+            if (stepPhase === 'load' || stepPhase === 'multiply') highlightCode('line-math', 'line-for');
+            if (stepPhase === 'store') highlightCode('line-store');
+
+            const ind = document.getElementById('phaseIndicator');
+            if (ind) ind.textContent = stepPhase.toUpperCase();
+
+            const totalBytes = totalTransactions * 32; 
+            const usefulBytes = usefulLoads * 4; 
+            const utilization = totalBytes === 0 ? 0 : Math.round((usefulBytes / totalBytes) * 100);
+            document.getElementById('bandwidthUtil').textContent = utilization + '%';
+            document.getElementById('bandwidthPercent').textContent = utilization + '%';
+            document.getElementById('bandwidthCircle').setAttribute('stroke-dasharray', `${utilization}, 100`);
+            document.getElementById('bandwidthBreakdown').innerHTML = `Useful: ${usefulBytes}B<br>Moved: ${totalBytes}B`;
+
+            const tableBody = document.getElementById('warpTableBody');
+            if (!tableBody) return;
+            tableBody.innerHTML = '';
+
+            for (let w = 0; w < 4; w++) {
+                const curI = isCoalesced ? iBase : iBase + w;
+                const curJ = isCoalesced ? jBase + w : jBase;
+                if (curI >= M || curJ >= N) continue;
+
+                const isFocused = (w === focusIdx);
+                if (!warpMode && !isFocused) continue;
+
+                const valA = matrixData.A[curI][k];
+                const valB = matrixData.B[k][curJ];
+                const curTmp = matrixData.warpTmps[w];
+
+                const cCell = document.getElementById(`c-${curI}-${curJ}`);
+                if (cCell) cCell.classList.add(isFocused ? 'active-c' : 'warp-active-c');
+
+                if (stepPhase === 'load' || stepPhase === 'multiply') {
+                    const aCell = document.getElementById(`a-${curI}-${k}`);
+                    const bCell = document.getElementById(`b-${k}-${curJ}`);
+                    if (aCell) aCell.classList.add(isFocused || !isCoalesced ? 'active-a' : 'warp-active-a');
+                    if (bCell) bCell.classList.add(isFocused || isCoalesced ? 'active-b' : 'warp-active-b');
+                    
+                    const memIdxA = curI * K + k;
+                    const memIdxB = k * N + curJ;
+                    document.getElementById(`mem-a-${memIdxA}`)?.classList.add(isCoalesced ? 'active-read' : 'active-strided');
+                    document.getElementById(`mem-b-${memIdxB}`)?.classList.add(isCoalesced ? 'active-read' : 'active-read');
+                }
+
+                if (stepPhase === 'store') {
+                    const memIdxC = curI * N + curJ;
+                    document.getElementById(`mem-c-${memIdxC}`)?.classList.add('active-write');
+                }
+
+                const row = document.createElement('tr');
+                row.className = `warp-row border-b border-slate-100 ${isFocused ? 'focused font-bold' : ''}`;
+                
+                const typeA = isCoalesced ? '<span class="text-[9px] opacity-50">(Broadcast)</span>' : '<span class="text-[9px] text-red-500 font-bold">(Strided)</span>';
+                const typeB = isCoalesced ? '<span class="text-[9px] text-green-500 font-bold">(Coalesced)</span>' : '<span class="text-[9px] opacity-50">(Broadcast)</span>';
+
+                row.innerHTML = `
+                    <th class="px-4 py-2 text-slate-400 italic">Lane ${w}</th>
+                    <td>${isCoalesced ? jBase + w : iBase + w}</td>
+                    <td>(${curI}, ${curJ})</td>
+                    <td>${valA} ${typeA}</td>
+                    <td>${valB} ${typeB}</td>
+                    <td class="text-blue-600 ${stepPhase === 'multiply' ? 'math-anim' : ''}">${curTmp}</td>
+                `;
+                tableBody.appendChild(row);
+            }
+            
+            const eff = document.getElementById('efficiencyMetric');
+            if (eff) eff.textContent = `Bus Efficiency: ${isCoalesced ? '100%' : '25%'}`;
+        }
+
+        function highlightCode(...ids) {
+            ids.forEach(id => document.getElementById(id)?.classList.add('code-highlight'));
+        }
+
+        function step() {
+            if (state.stepPhase === 'init') {
+                state.stepPhase = 'load';
+            } else if (state.stepPhase === 'load') {
+                for (let w = 0; w < 4; w++) {
+                    const curI = state.isCoalesced ? state.iBase : state.iBase + w;
+                    const curJ = state.isCoalesced ? state.jBase + w : state.jBase;
+                    if (curI < M && curJ < N) {
+                        matrixData.warpTmps[w] += matrixData.A[curI][state.k] * matrixData.B[state.k][curJ];
+                        usefulLoads += 2; 
+                    }
+                }
+                totalTransactions += state.isCoalesced ? 2 : 5;
+                document.getElementById('transactionCount').textContent = totalTransactions;
+                state.stepPhase = 'multiply';
+            } else if (state.stepPhase === 'multiply') {
+                if (state.k < K - 1) { state.k++; state.stepPhase = 'load'; }
+                else state.stepPhase = 'store';
+            } else if (state.stepPhase === 'store') {
+                for (let w = 0; w < 4; w++) {
+                    const curI = state.isCoalesced ? state.iBase : state.iBase + w;
+                    const curJ = state.isCoalesced ? state.jBase + w : state.jBase;
+                    if (curI < M && curJ < N) {
+                        const final = matrixData.warpTmps[w] + matrixData.C_initial[curI][curJ];
+                        matrixData.C_current[curI][curJ] = final;
+                        const cell = document.getElementById(`c-${curI}-${curJ}`);
+                        if (cell) cell.textContent = final;
+                        usefulLoads += 1; 
+                    }
+                }
+                totalTransactions += 1; 
+                state.k = 0; matrixData.warpTmps = [0,0,0,0];
+                if (state.isCoalesced) {
+                    state.jBase += 4; if (state.jBase >= N) { state.jBase = 0; state.iBase = (state.iBase + 1) % M; }
+                } else {
+                    state.iBase += 4; if (state.iBase >= M) { state.iBase = 0; state.jBase = (state.jBase + 1) % N; }
+                }
+                state.stepPhase = 'init';
+            }
+            updateUI();
+        }
+
+        function hardReset() {
+            if (state.isPlaying) { state.isPlaying = false; clearInterval(timer); const pi = document.getElementById('playIcon'); if (pi) pi.textContent = '▶ Play'; }
+            state.iBase = 0; state.jBase = 0; state.focusIdx = 0; state.k = 0; state.stepPhase = 'init';
+            totalTransactions = 0; usefulLoads = 0;
+            const tc = document.getElementById('transactionCount'); if (tc) tc.textContent = 0;
+            matrixData.warpTmps = [0,0,0,0];
+            matrixData.C_current = JSON.parse(JSON.stringify(matrixData.C_initial));
+            initDRAM(); initGrids(); updateUI();
+        }
+
+        function resetLocal() { state.k = 0; matrixData.warpTmps = [0, 0, 0, 0]; state.stepPhase = 'init'; }
+
+        let timer;
+        const ppb = document.getElementById('playPauseBtn');
+        if (ppb) {
+            ppb.onclick = () => {
+                state.isPlaying = !state.isPlaying;
+                const pi = document.getElementById('playIcon');
+                if (pi) pi.textContent = state.isPlaying ? '⏸ Pause' : '▶ Play';
+                if (state.isPlaying) timer = setInterval(step, state.speed);
+                else clearInterval(timer);
+            };
+        }
+        
+        const sb = document.getElementById('stepBtn'); if (sb) sb.onclick = step;
+        const rb = document.getElementById('resetBtn'); if (rb) rb.onclick = hardReset;
+        
+        const ss = document.getElementById('speedSlider');
+        if (ss) {
+            ss.oninput = (e) => {
+                state.speed = e.target.value;
+                const sv = document.getElementById('speedVal');
+                if (sv) sv.textContent = `${state.speed}ms`;
+                if (state.isPlaying) { clearInterval(timer); timer = setInterval(step, state.speed); }
+            };
+        }
+        
+        const wm = document.getElementById('warpMode'); if (wm) wm.onchange = (e) => { state.warpMode = e.target.checked; updateUI(); };
+
+        const mc = document.getElementById('modeCoalesced');
+        if (mc) {
+            mc.onclick = function() {
+                state.isCoalesced = true; this.className = "px-4 py-2 rounded-lg text-sm font-bold transition-all bg-blue-600 text-white shadow-md";
+                const mn = document.getElementById('modeNonCoalesced'); if (mn) mn.className = "px-4 py-2 rounded-lg text-sm font-bold transition-all bg-slate-100 text-slate-600 hover:bg-slate-200";
+                hardReset();
+            };
+        }
+        
+        const mn = document.getElementById('modeNonCoalesced');
+        if (mn) {
+            mn.onclick = function() {
+                state.isCoalesced = false; this.className = "px-4 py-2 rounded-lg text-sm font-bold transition-all bg-blue-600 text-white shadow-md";
+                const mc = document.getElementById('modeCoalesced'); if (mc) mc.className = "px-4 py-2 rounded-lg text-sm font-bold transition-all bg-slate-100 text-slate-600 hover:bg-slate-200";
+                hardReset();
+            };
+        }
+
+        window.onload = () => { initDRAM(); initGrids(); updateUI(); };
+    </script>
+</body>
+</html>
