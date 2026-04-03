@@ -5,6 +5,7 @@
 /bazel-testlogs
 /bazel-template
 /bazel-*
+.DS_Store
 *.md2
 *.bazel.lock
 

@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA Register Tiling Visualization</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .grid-cell {
+            transition: all 0.2s ease-in-out;
+        }
+        .highlight-global-a {
+            background-color: #bfdbfe !important; /* blue-200 */
+            color: #1e3a8a !important; /* blue-900 */
+            font-weight: bold;
+            transform: scale(1.1);
+            z-index: 10;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .highlight-global-b {
+            background-color: #a7f3d0 !important; /* emerald-200 */
+            color: #064e3b !important; /* emerald-900 */
+            font-weight: bold;
+            transform: scale(1.1);
+            z-index: 10;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .highlight-as {
+            background-color: #60a5fa !important; /* blue-400 */
+            color: white;
+            transform: scale(1.1);
+            z-index: 10;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .highlight-as-light {
+            background-color: #93c5fd !important; /* blue-300 */
+            color: white;
+            transform: scale(1.05);
+            z-index: 9;
+            box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+        }
+        .highlight-bs {
+            background-color: #34d399 !important; /* emerald-400 */
+            color: white;
+            transform: scale(1.1);
+            z-index: 10;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .highlight-res {
+            background-color: #c084fc !important; /* purple-400 */
+            color: white;
+            transform: scale(1.1);
+            z-index: 10;
+        }
+        .highlight-res-light {
+            background-color: #d8b4fe !important; /* purple-300 */
+            color: white;
+            transform: scale(1.05);
+            z-index: 9;
+        }
+        .highlight-c {
+            background-color: #fb923c !important; /* orange-400 */
+            color: white !important;
+            transform: scale(1.1);
+            z-index: 10;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .highlight-c-light {
+            background-color: #fdba74 !important; /* orange-300 */
+            color: white !important;
+            transform: scale(1.05);
+            z-index: 9;
+            box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+        }
+        .active-line {
+            background-color: #334155; /* slate-700 */
+            border-left: 4px solid #38bdf8; /* sky-400 */
+        }
+        .dimmed {
+            opacity: 0.25;
+        }
+        
+        /* Custom range slider styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #0ea5e9;
+            cursor: pointer;
+            margin-top: -6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #cbd5e1;
+            border-radius: 2px;
+        }
+        input[type=range]:focus {
+            outline: none;
+        }
+
+        /* Tooltip hint styling */
+        .code-line {
+            border-bottom: 1px dashed transparent;
+        }
+        .code-line:hover {
+            border-bottom-color: #94a3b8;
+            background-color: #1e293b;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col">
+
+    <header class="bg-slate-900 text-white p-6 shadow-md">
+        <div class="max-w-[90rem] mx-auto flex justify-between items-center flex-wrap gap-4">
+            <div>
+                <h1 class="text-3xl font-bold mb-2">SGEMM Register Tiling: <span id="title-thread-name" class="text-sky-400">Thread(0,0)</span> View</h1>
+                <p class="text-slate-300">
+                    Understanding the <code class="bg-slate-800 px-1 rounded text-sky-300">dotIdx</code> and <code class="bg-slate-800 px-1 rounded text-sky-300">resultIndex</code> loops.
+                    <br>Parameters: <b>M=8, N=8, K=8 | BM=8, BN=4, BK=4, TM=4</b>. 
+                </p>
+                <div class="mt-4 bg-slate-800 p-3 rounded-lg inline-flex flex-col gap-2 border border-slate-700 shadow-inner">
+                    <span class="text-sm font-semibold text-slate-300 flex justify-between items-center">
+                        Select Thread Matrix <span class="text-xs font-normal text-slate-400 ml-4">threadIdx.(y, x)</span>
+                    </span>
+                    <div class="grid grid-cols-4 gap-1.5" id="thread-matrix-container">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+            <div class="hidden md:block bg-slate-800 p-3 rounded-lg border border-slate-700 text-sm font-mono text-slate-400">
+                Performance: Dramatically reduces <br>Shared Memory read bandwidth.
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-grow p-6 max-w-[90rem] mx-auto w-full grid grid-cols-1 xl:grid-cols-12 gap-8">
+        
+        <!-- Left Column: Code and Explanation -->
+        <div class="xl:col-span-5 flex flex-col gap-6">
+            
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+                <h2 class="text-xl font-bold mb-4">Why two loops?</h2>
+                <p class="text-sm text-slate-600 mb-3">
+                    In a naive kernel, 1 thread calculates 1 output element. It loads 1 value from A and 1 from B for every multiplication.
+                </p>
+                <p class="text-sm text-slate-600 mb-3">
+                    With <b>Register Tiling</b>, 1 thread calculates <b>TM=4</b> output elements! To do this efficiently:
+                </p>
+                <ul class="text-sm text-slate-600 list-disc pl-5 space-y-2">
+                    <li>The <code class="text-sky-600 font-bold">dotIdx</code> loop iterates through the K dimension (size BK=4).</li>
+                    <li>We load <b>one</b> value from <code class="text-emerald-600 font-bold">Bs</code> into a fast register (<code class="text-slate-800 font-bold">regB</code>).</li>
+                    <li>The <code class="text-purple-600 font-bold">resultIndex</code> loop multiplies that <i>single</i> <code class="text-slate-800 font-bold">regB</code> value against <b>TM=4</b> different values from <code class="text-blue-600 font-bold">As</code>.</li>
+                </ul>
+                <p class="text-sm text-emerald-600 font-bold mt-3 bg-emerald-50 p-2 rounded border border-emerald-100">
+                    Result: We reused the memory loaded into regB 4 times! This drastically reduces memory bandwidth bottlenecks.
+                </p>
+            </div>
+
+            <div class="bg-slate-900 rounded-xl shadow-sm overflow-hidden">
+                <div class="bg-slate-800 text-slate-400 text-xs px-4 py-2 uppercase font-semibold tracking-wider flex justify-between">
+                    <span>Kernel Code</span>
+                    <span class="text-sky-400">Hover for info</span>
+                </div>
+                <pre class="text-slate-300 p-4 text-sm font-mono overflow-x-auto leading-relaxed" id="code-container">
+<div id="line-0" class="px-2 py-1 transition-colors code-line cursor-help" title="Iterates over the full K dimension in chunks of BK.">for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {</div>
+<div id="line-1" class="px-2 py-1 transition-colors code-line cursor-help text-slate-400 pl-6" title="Phase 1: Each thread pulls elements from Global to Shared Memory">  // 1. Fetch Global to Shared (As, Bs)</div>
+<div id="line-2" class="px-2 py-1 transition-colors code-line cursor-help text-slate-400 pl-6" title="Wait for all threads in the block to finish loading.">  __syncthreads();</div>
+<div id="line-3" class="px-2 py-1 transition-colors code-line cursor-help pl-6" title="Steps across the 4 elements loaded in the current tile's K dimension.">  for (int dotIdx = 0; dotIdx < BK; ++dotIdx) {</div>
+<div id="line-4" class="px-2 py-1 transition-colors text-emerald-300 code-line cursor-help pl-10" title="Crucial step: Fetches ONE value from Shared Memory (Bs) and stores it in a fast Register (regB).">    float regB = Bs[dotIdx][threadCol];</div>
+<div id="line-5" class="px-2 py-1 transition-colors code-line cursor-help pl-10" title="Tells the compiler to expand the loop below, saving branch instruction overhead.">    #pragma unroll</div>
+<div id="line-6" class="px-2 py-1 transition-colors code-line cursor-help pl-10" title="The Register Tiling loop: We compute TM (4) results sequentially.">    for (int resultIndex = 0; resultIndex < TM; ++resultIndex) {</div>
+<div id="line-7" class="px-2 py-1 transition-colors text-blue-300 code-line cursor-help pl-14" title="Accumulates the math into thread-local registers (threadResults).">      threadResults[resultIndex] += </div>
+<div id="line-8" class="px-2 py-1 transition-colors text-blue-300 code-line cursor-help pl-14" title="Multiplies the As value by the highly-reused regB value.">         As[threadRow*TM + resultIndex][dotIdx] * regB;</div>
+<div id="line-9" class="px-2 py-1 transition-colors code-line pl-10">    }</div>
+<div id="line-10" class="px-2 py-1 transition-colors code-line pl-6">  }</div>
+<div id="line-11" class="px-2 py-1 transition-colors code-line cursor-help text-slate-400 pl-6" title="Wait for all threads to finish computing before loading the next chunk.">  __syncthreads();</div>
+<div id="line-12" class="px-2 py-1 transition-colors code-line">}</div></pre>
+            </div>
+
+        </div>
+
+        <!-- Right Column: Visualization -->
+        <div class="xl:col-span-7 flex flex-col gap-6">
+            
+            <!-- Controls (Moved to Top Right) -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col items-center">
+                <div class="text-center mb-4 w-full">
+                    <span class="text-xs font-bold text-slate-400 uppercase tracking-widest">Step <span id="step-counter">1</span> of <span id="total-steps">X</span></span>
+                    <h3 id="step-title" class="text-lg font-bold text-slate-800 mt-1 min-h-[4rem] flex flex-col items-center justify-center">Initialization</h3>
+                </div>
+
+                <div class="w-full flex justify-end items-center mb-4">
+                    <label class="flex items-center gap-2 cursor-pointer text-sm text-slate-600 hover:text-slate-800 transition-colors bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
+                        <input type="checkbox" id="toggle-group" onchange="toggleGroupMode()" class="w-4 h-4 text-sky-500 rounded border-slate-300 focus:ring-sky-500 cursor-pointer">
+                        Group <code class="bg-slate-200 px-1 rounded text-xs text-purple-700 font-bold">resultIndex</code> loop steps
+                    </label>
+                </div>
+                
+                <div class="flex flex-wrap sm:flex-nowrap gap-3 w-full mb-4">
+                    <button id="btn-prev" onclick="prevStep()" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2 px-4 rounded-lg transition-colors disabled:opacity-50 min-w-[80px]">
+                        &larr; Back
+                    </button>
+                    <button id="btn-reset" onclick="resetStep()" class="flex-1 bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold py-2 px-4 rounded-lg transition-colors disabled:opacity-50 min-w-[80px]">
+                        &#x21ba; Reset
+                    </button>
+                    <button id="btn-play" onclick="togglePlay()" class="flex-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-bold py-2 px-4 rounded-lg transition-colors min-w-[80px]">
+                        &#x25B6; Play
+                    </button>
+                    <button id="btn-next" onclick="nextStep()" class="flex-[2] bg-sky-500 hover:bg-sky-600 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-colors disabled:opacity-50 min-w-[120px]">
+                        Next Step &rarr;
+                    </button>
+                </div>
+                
+                <!-- Timeline Slider -->
+                <div class="w-full flex items-center gap-3">
+                    <span class="text-xs text-slate-400 font-mono">1</span>
+                    <input type="range" id="step-slider" min="0" max="0" value="0" class="flex-grow">
+                    <span id="slider-max-label" class="text-xs text-slate-400 font-mono">X</span>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-8 flex flex-col items-center overflow-x-auto">
+                
+                <!-- NEW: Global Memory Matrices -->
+                <div class="w-full flex flex-wrap justify-center gap-12 mb-10 pb-10 border-b border-slate-200 relative pt-4">
+                    <div class="absolute top-0 left-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-100 px-2 py-1 rounded">Global Memory (Original Matrices)</div>
+                    
+                    <div class="flex flex-col items-center">
+                        <h3 class="font-bold text-slate-700 mb-2 mt-2">Matrix A [8][8]</h3>
+                        <div id="grid-global-a" class="grid grid-cols-8 gap-px bg-slate-300 border border-slate-300 rounded overflow-hidden shadow-sm">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <div class="flex flex-col items-center">
+                        <h3 class="font-bold text-slate-700 mb-2 mt-2">Matrix B [8][8]</h3>
+                        <div id="grid-global-b" class="grid grid-cols-8 gap-px bg-slate-300 border border-slate-300 rounded overflow-hidden shadow-sm">
+                            <!-- Populated by JS -->
+                        </div>
+                        <p class="text-[10px] text-slate-400 mt-2 max-w-[150px] text-center leading-tight">Cols 4-7 are ignored by this specific block</p>
+                    </div>
+                </div>
+
+                <!-- Shared Memory, Registers, and Result C -->
+                <div class="min-w-max flex flex-wrap justify-center gap-12">
+                    
+                    <!-- Matrix As -->
+                    <div class="flex flex-col items-center relative">
+                        <span class="absolute -top-3 bg-slate-700 text-white text-[10px] px-2 py-0.5 rounded shadow-sm z-20">Shared Memory</span>
+                        <h3 class="font-bold text-blue-600 mb-2 mt-2">As [8][4]</h3>
+                        <div id="grid-as" class="grid grid-cols-4 gap-1 bg-slate-100 p-2 rounded-lg border border-slate-200 transition-colors relative">
+                            <!-- Populated by JS -->
+                        </div>
+                        <p id="as-subtitle" class="text-xs text-slate-400 mt-2">Rows 0-3 are computed by Thread(0,0)</p>
+                    </div>
+
+                    <!-- Matrix Bs and Registers -->
+                    <div class="flex flex-col items-center gap-8">
+                        
+                        <div class="flex flex-col items-center relative">
+                            <span class="absolute -top-3 bg-slate-700 text-white text-[10px] px-2 py-0.5 rounded shadow-sm z-20">Shared Memory</span>
+                            <h3 class="font-bold text-emerald-600 mb-2 mt-2">Bs [4][4]</h3>
+                            <div id="grid-bs" class="grid grid-cols-4 gap-1 bg-slate-100 p-2 rounded-lg border border-slate-200 transition-colors relative">
+                                <!-- Populated by JS -->
+                            </div>
+                            <p id="bs-subtitle" class="text-xs text-slate-400 mt-2">Col 0 is for Threads(*,0)</p>
+                        </div>
+
+                        <div class="flex gap-8 w-full justify-center">
+                            <!-- regB Register -->
+                            <div class="flex flex-col items-center relative mt-2">
+                                <span class="absolute -top-4 bg-purple-600 text-white text-[10px] px-2 py-0.5 rounded shadow-sm z-20">Registers</span>
+                                <h3 class="font-bold text-slate-700 mb-2 text-sm mt-1 text-center">regB</h3>
+                                <div id="reg-b" class="w-16 h-16 bg-emerald-50 border-2 border-emerald-200 rounded-xl flex items-center justify-center text-xl font-bold text-emerald-700 transition-all shadow-inner relative">
+                                    -
+                                </div>
+                                <div id="reg-b-reuse" class="absolute -bottom-7 text-[10px] font-bold text-emerald-700 opacity-0 transition-all duration-300 whitespace-nowrap bg-emerald-100 px-2 py-0.5 rounded-full border border-emerald-300 shadow-sm transform -translate-y-1"></div>
+                            </div>
+
+                            <!-- threadResults -->
+                            <div class="flex flex-col items-center relative mt-2">
+                                <span class="absolute -top-4 bg-purple-600 text-white text-[10px] px-2 py-0.5 rounded shadow-sm z-20">Registers</span>
+                                <h3 class="font-bold text-purple-600 mb-2 text-sm mt-1 text-center">threadResults[TM]</h3>
+                                <div id="grid-res" class="grid grid-cols-1 gap-1 bg-slate-100 p-2 rounded-lg border border-slate-200">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Matrix C Tile -->
+                    <div class="flex flex-col items-center w-full mt-8 pt-8 border-t border-slate-200 relative">
+                        <span class="absolute top-5 bg-orange-600 text-white text-[10px] px-2 py-0.5 rounded shadow-sm z-20">Global Memory</span>
+                        <h3 class="font-bold text-orange-600 mb-2 mt-3">Block Matrix C [8][4]</h3>
+                        <div id="grid-c" class="grid grid-cols-4 gap-1 bg-slate-100 p-2 rounded-lg border border-slate-200 shadow-inner">
+                            <!-- Populated by JS -->
+                        </div>
+                        <p id="c-subtitle" class="text-xs text-slate-400 mt-2">Thread(0,0) computes the highlighted 4x1 section.</p>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // --- Data Setup ---
+
+        // Global Matrix A [8][8]
+        const Global_A = [
+            [1, 2, 3, 1, 2, 2, 1, 1], 
+            [2, 3, 1, 2, 1, 1, 3, 1], 
+            [3, 1, 2, 3, 2, 1, 1, 2], 
+            [1, 2, 3, 1, 1, 3, 2, 1], 
+            [2, 1, 2, 1, 3, 2, 1, 2], 
+            [1, 3, 1, 2, 1, 1, 2, 3], 
+            [2, 2, 3, 1, 2, 1, 1, 1], 
+            [3, 1, 2, 2, 1, 2, 2, 2]
+        ];
+
+        // Global Matrix B [8][8] (Cols 4-7 are 0 because this specific block only processes Cols 0-3)
+        const Global_B = [
+            [2, 1, 3, 2, 0, 0, 0, 0], 
+            [1, 2, 1, 3, 0, 0, 0, 0], 
+            [3, 1, 2, 1, 0, 0, 0, 0], 
+            [2, 3, 1, 2, 0, 0, 0, 0], 
+            [1, 2, 2, 1, 0, 0, 0, 0], 
+            [2, 1, 1, 2, 0, 0, 0, 0], 
+            [1, 3, 2, 1, 0, 0, 0, 0], 
+            [3, 1, 1, 3, 0, 0, 0, 0]
+        ];
+
+        // Chunk 1 (bkIdx = 0)
+        const As_chunk0 = [
+            [1, 2, 3, 1], [2, 3, 1, 2], [3, 1, 2, 3], [1, 2, 3, 1],
+            [2, 1, 2, 1], [1, 3, 1, 2], [2, 2, 3, 1], [3, 1, 2, 2]
+        ];
+        const Bs_chunk0 = [
+            [2, 1, 3, 2], [1, 2, 1, 3], [3, 1, 2, 1], [2, 3, 1, 2]
+        ];
+
+        // Chunk 2 (bkIdx = 4)
+        const As_chunk1 = [
+            [2, 2, 1, 1], [1, 1, 3, 1], [2, 1, 1, 2], [1, 3, 2, 1],
+            [3, 2, 1, 2], [1, 1, 2, 3], [2, 1, 1, 1], [1, 2, 2, 2]
+        ];
+        const Bs_chunk1 = [
+            [1, 2, 2, 1], [2, 1, 1, 2], [1, 3, 2, 1], [3, 1, 1, 3]
+        ];
+
+        let currentStep = 0;
+        let steps = [];
+        let isPlaying = false;
+        let playInterval = null;
+        let currentThread = {r: 0, c: 0};
+        let groupResultIndex = false;
+
+        // --- View Logic ---
+        function toggleGroupMode() {
+            groupResultIndex = document.getElementById('toggle-group').checked;
+            if (isPlaying) togglePlay();
+            currentStep = 0;
+            generateSteps();
+            renderStep(0);
+        }
+
+        function changeThread(r, c) {
+            if (currentThread.r === r && currentThread.c === c) return;
+            currentThread = {r, c};
+            
+            // Clear C matrix visualization on thread change to avoid confusion
+            for(let row=0; row<8; row++) {
+                for(let col=0; col<4; col++) {
+                    const el = document.getElementById(`c-${row}-${col}`);
+                    if(el) el.innerText = "0";
+                }
+            }
+
+            if(isPlaying) togglePlay();
+            currentStep = 0;
+            updateThreadMatrixUI();
+            updateGridDimming();
+            generateSteps();
+            renderStep(0);
+        }
+
+        function updateThreadMatrixUI() {
+            for(let r=0; r<2; r++) {
+                for(let c=0; c<4; c++) {
+                    const btn = document.getElementById(`th-btn-${r}-${c}`);
+                    if(btn) {
+                        if(r === currentThread.r && c === currentThread.c) {
+                            btn.className = "px-2 py-1 rounded text-xs font-mono border transition-colors bg-sky-500 text-white border-sky-400 shadow-md";
+                        } else {
+                            btn.className = "px-2 py-1 rounded text-xs font-mono border transition-colors bg-slate-700 text-slate-300 border-slate-600 hover:bg-slate-600 hover:text-white";
+                        }
+                    }
+                }
+            }
+        }
+
+        function updateGridDimming() {
+            const startRow = currentThread.r * 4;
+            const endRow = startRow + 3;
+            
+            // As dimming
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<4; c++) {
+                    const el = document.getElementById(`as-${r}-${c}`);
+                    if(r >= startRow && r <= endRow) el.classList.remove('dimmed');
+                    else el.classList.add('dimmed');
+                }
+            }
+
+            // Bs dimming
+            for(let r=0; r<4; r++) {
+                for(let c=0; c<4; c++) {
+                    const el = document.getElementById(`bs-${r}-${c}`);
+                    if(c === currentThread.c) el.classList.remove('dimmed');
+                    else el.classList.add('dimmed');
+                }
+            }
+
+            // C dimming
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<4; c++) {
+                    const el = document.getElementById(`c-${r}-${c}`);
+                    if(r >= startRow && r <= endRow && c === currentThread.c) el.classList.remove('dimmed');
+                    else el.classList.add('dimmed');
+                }
+            }
+            
+            // Update Subtitles
+            document.getElementById('as-subtitle').innerText = `Rows ${startRow}-${endRow} are computed by Thread(${currentThread.r},${currentThread.c})`;
+            document.getElementById('bs-subtitle').innerText = `Col ${currentThread.c} is for Threads(*,${currentThread.c})`;
+            document.getElementById('c-subtitle').innerText = `Thread(${currentThread.r},${currentThread.c}) computes the highlighted 4x1 section.`;
+            document.getElementById('title-thread-name').innerText = `Thread(${currentThread.r},${currentThread.c})`;
+        }
+
+        // Generate the sequence of steps
+        function generateSteps() {
+            steps = [];
+            let threadResults = [0, 0, 0, 0];
+            
+            const chunks = [
+                { As: As_chunk0, Bs: Bs_chunk0, bkIdx: 0, chunkNum: 1 },
+                { As: As_chunk1, Bs: Bs_chunk1, bkIdx: 4, chunkNum: 2 }
+            ];
+
+            for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+                const chunk = chunks[chunkIdx];
+                const As_vals = chunk.As;
+                const Bs_vals = chunk.Bs;
+
+                // --- Phase 1: Loading ---
+                steps.push({
+                    title: `Chunk ${chunk.chunkNum}/2: Fetch Global to Shared`,
+                    equation: `bkIdx = ${chunk.bkIdx}: Threads collaboratively load As and Bs`,
+                    codeLines: [0, 1],
+                    hlAs: 'all', hlBs: 'all', hlRes: -1, regB: "-", results: [...threadResults],
+                    currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "", activeChunk: chunkIdx
+                });
+
+                steps.push({
+                    title: `Chunk ${chunk.chunkNum}/2: __syncthreads()`,
+                    equation: `Wait for all threads to finish loading tile`,
+                    codeLines: [2],
+                    hlAs: [], hlBs: [], hlRes: -1, regB: "-", results: [...threadResults],
+                    currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "", activeChunk: chunkIdx
+                });
+
+                // --- Phase 2: Compute ---
+                steps.push({
+                    title: `Ready to start K-chunk computation`,
+                    codeLines: [3],
+                    hlAs: [], hlBs: [], hlRes: -1, regB: "-", results: [...threadResults],
+                    currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "", activeChunk: chunkIdx
+                });
+
+                for (let dot = 0; dot < 4; dot++) {
+                    // Step 1: dotIdx loop iteration
+                    steps.push({
+                        title: `Chunk ${chunk.chunkNum}/2: dotIdx = ${dot} begins`,
+                        codeLines: [3],
+                        hlAs: [], hlBs: [], hlRes: -1, regB: "-", results: [...threadResults],
+                        currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "", activeChunk: chunkIdx
+                    });
+
+                    let b_val = Bs_vals[dot][currentThread.c];
+                    
+                    // Step 2: Load regB
+                    steps.push({
+                        title: `Load 1 element from Bs into regB`,
+                        codeLines: [4],
+                        hlAs: [], hlBs: [[dot, currentThread.c]], hlRes: -1, regB: b_val, results: [...threadResults],
+                        currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "Loaded", activeChunk: chunkIdx
+                    });
+
+                    // Step 3: Result Index loop
+                    if (groupResultIndex) {
+                        let hlAsArr = [];
+                        let hlAsLightArr = [];
+                        let hlResArr = [];
+                        let hlResLightArr = [];
+                        
+                        for (let res = 0; res < 4; res++) {
+                            let globalRow = currentThread.r * 4 + res;
+                            let a_val = As_vals[globalRow][dot];
+                            threadResults[res] += (a_val * b_val);
+                            
+                            if (res === 0) {
+                                hlAsArr.push([globalRow, dot]);
+                                hlResArr.push(res);
+                            } else {
+                                hlAsLightArr.push([globalRow, dot]);
+                                hlResLightArr.push(res);
+                            }
+                        }
+
+                        steps.push({
+                            title: `resultIndex = 0 to 3: Accumulate all MACs`,
+                            codeLines: [7, 8],
+                            hlAs: hlAsArr, 
+                            hlAsLight: hlAsLightArr,
+                            hlBs: [[dot, currentThread.c]], 
+                            hlRes: hlResArr, 
+                            hlResLight: hlResLightArr,
+                            regB: b_val, 
+                            results: [...threadResults],
+                            equation: `Computed 4 MACs simultaneously using regB = ${b_val}`,
+                            currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "Used 4x instantly!", activeChunk: chunkIdx
+                        });
+                    } else {
+                        for (let res = 0; res < 4; res++) {
+                            let globalRow = currentThread.r * 4 + res;
+                            let a_val = As_vals[globalRow][dot];
+                            let old_res = threadResults[res];
+                            threadResults[res] += (a_val * b_val);
+
+                            steps.push({
+                                title: `resultIndex = ${res}: Accumulate MAC`,
+                                codeLines: [7, 8],
+                                hlAs: [[globalRow, dot]], hlBs: [[dot, currentThread.c]], hlRes: res, 
+                                regB: b_val, results: [...threadResults],
+                                equation: `${old_res} + (${a_val} * ${b_val}) = ${threadResults[res]}`,
+                                currentAs: As_vals, currentBs: Bs_vals, regBReuseText: `Use ${res + 1} of 4`, activeChunk: chunkIdx
+                            });
+                        }
+                    }
+                }
+                
+                steps.push({
+                    title: `Chunk ${chunk.chunkNum}/2 Computations Complete!`,
+                    codeLines: [11],
+                    hlAs: [], hlBs: [], hlRes: -1, regB: "-", results: [...threadResults],
+                    currentAs: As_vals, currentBs: Bs_vals, regBReuseText: "", activeChunk: chunkIdx
+                });
+            }
+
+            // --- Phase 3: Done ---
+            steps.push({
+                title: "Kernel Execution Complete!",
+                equation: "All chunks processed. Thread registers now ready to write to Matrix C.",
+                codeLines: [12],
+                hlAs: [], hlBs: [], hlRes: 'all', regB: "-", results: [...threadResults],
+                currentAs: chunks[1].As, currentBs: chunks[1].Bs, regBReuseText: "", activeChunk: 1
+            });
+
+            const totalSteps = steps.length;
+            document.getElementById('total-steps').innerText = totalSteps;
+            const slider = document.getElementById('step-slider');
+            if (slider) {
+                slider.max = totalSteps - 1;
+                document.getElementById('slider-max-label').innerText = totalSteps;
+            }
+        }
+
+        // --- DOM Initialization ---
+        function initDOM() {
+
+            // Global A Grid (8x8)
+            const gridGlobalA = document.getElementById('grid-global-a');
+            gridGlobalA.innerHTML = '';
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<8; c++) {
+                    const div = document.createElement('div');
+                    div.id = `global-a-${r}-${c}`;
+                    div.className = `grid-cell w-6 h-6 flex items-center justify-center bg-white text-slate-500 font-semibold text-[10px]`;
+                    div.innerText = Global_A[r][c];
+                    gridGlobalA.appendChild(div);
+                }
+            }
+
+            // Global B Grid (8x8)
+            const gridGlobalB = document.getElementById('grid-global-b');
+            gridGlobalB.innerHTML = '';
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<8; c++) {
+                    const div = document.createElement('div');
+                    div.id = `global-b-${r}-${c}`;
+                    div.className = `grid-cell w-6 h-6 flex items-center justify-center bg-white text-slate-500 font-semibold text-[10px] ${c >= 4 ? 'dimmed' : ''}`;
+                    div.innerText = Global_B[r][c];
+                    gridGlobalB.appendChild(div);
+                }
+            }
+
+            // As Grid (8x4)
+            const gridAs = document.getElementById('grid-as');
+            gridAs.innerHTML = ''; // Ensure clean slate
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<4; c++) {
+                    const div = document.createElement('div');
+                    div.id = `as-${r}-${c}`;
+                    div.className = `grid-cell w-10 h-10 flex items-center justify-center bg-blue-50 border border-blue-200 rounded text-blue-800 font-semibold text-sm`;
+                    div.innerText = As_chunk0[r][c];
+                    gridAs.appendChild(div);
+                }
+            }
+
+            // Bs Grid (4x4)
+            const gridBs = document.getElementById('grid-bs');
+            gridBs.innerHTML = '';
+            for(let r=0; r<4; r++) {
+                for(let c=0; c<4; c++) {
+                    const div = document.createElement('div');
+                    div.id = `bs-${r}-${c}`;
+                    div.className = `grid-cell w-10 h-10 flex items-center justify-center bg-emerald-50 border border-emerald-200 rounded text-emerald-800 font-semibold text-sm`;
+                    div.innerText = Bs_chunk0[r][c];
+                    gridBs.appendChild(div);
+                }
+            }
+
+            // Results Grid (4x1)
+            const gridRes = document.getElementById('grid-res');
+            gridRes.innerHTML = '';
+            for(let r=0; r<4; r++) {
+                const div = document.createElement('div');
+                div.id = `res-${r}`;
+                div.className = `grid-cell w-20 h-10 flex items-center justify-center bg-purple-50 border border-purple-200 rounded text-purple-800 font-bold`;
+                div.innerText = "0";
+                gridRes.appendChild(div);
+            }
+
+            // C Grid (8x4)
+            const gridC = document.getElementById('grid-c');
+            gridC.innerHTML = '';
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<4; c++) {
+                    const div = document.createElement('div');
+                    div.id = `c-${r}-${c}`;
+                    div.className = `grid-cell w-10 h-10 flex items-center justify-center bg-orange-50 border border-orange-200 rounded text-orange-800 font-semibold text-sm`;
+                    div.innerText = "0";
+                    gridC.appendChild(div);
+                }
+            }
+
+            // Thread Matrix Selector (2x4 Grid)
+            const threadMatrix = document.getElementById('thread-matrix-container');
+            if (threadMatrix) {
+                threadMatrix.innerHTML = '';
+                for(let r=0; r<2; r++) {
+                    for(let c=0; c<4; c++) {
+                        const btn = document.createElement('button');
+                        btn.id = `th-btn-${r}-${c}`;
+                        btn.innerText = `(${r},${c})`;
+                        btn.onclick = () => changeThread(r, c);
+                        threadMatrix.appendChild(btn);
+                    }
+                }
+            }
+            updateThreadMatrixUI();
+
+            // Slider Event Listener
+            const slider = document.getElementById('step-slider');
+            slider.addEventListener('input', (e) => {
+                if (isPlaying) togglePlay(); 
+                currentStep = parseInt(e.target.value);
+                renderStep(currentStep);
+            });
+
+            updateGridDimming();
+        }
+
+        // --- Render State ---
+        function renderStep(stepIdx) {
+            const step = steps[stepIdx];
+            
+            // Text updates
+            document.getElementById('step-counter').innerText = stepIdx + 1;
+            let titleText = step.title;
+            if(step.equation) titleText += ` <br><span class="text-sm font-normal text-purple-600">${step.equation}</span>`;
+            document.getElementById('step-title').innerHTML = titleText;
+
+            // Sync Slider
+            document.getElementById('step-slider').value = stepIdx;
+
+            // Handle Global Memory Highlights
+            document.querySelectorAll('[id^="global-a-"]').forEach(el => el.classList.remove('highlight-global-a'));
+            document.querySelectorAll('[id^="global-b-"]').forEach(el => el.classList.remove('highlight-global-b'));
+
+            if (step.activeChunk !== undefined) {
+                const startColA = step.activeChunk * 4;
+                const startRowB = step.activeChunk * 4;
+
+                for(let r=0; r<8; r++) {
+                    for(let c=startColA; c<startColA+4; c++) {
+                        const el = document.getElementById(`global-a-${r}-${c}`);
+                        if(el) el.classList.add('highlight-global-a');
+                    }
+                }
+
+                for(let r=startRowB; r<startRowB+4; r++) {
+                    for(let c=0; c<4; c++) {
+                        const el = document.getElementById(`global-b-${r}-${c}`);
+                        if(el) el.classList.add('highlight-global-b');
+                    }
+                }
+            }
+
+            // Update Dynamic Array Values (Shows fetching new K chunks)
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<4; c++) {
+                    const el = document.getElementById(`as-${r}-${c}`);
+                    if(el) el.innerText = step.currentAs[r][c];
+                }
+            }
+            for(let r=0; r<4; r++) {
+                for(let c=0; c<4; c++) {
+                    const el = document.getElementById(`bs-${r}-${c}`);
+                    if(el) el.innerText = step.currentBs[r][c];
+                }
+            }
+
+            // Code highlighting (using the new codeLines array)
+            for(let i=0; i<=12; i++) {
+                const line = document.getElementById(`line-${i}`);
+                if (line) {
+                    let active = false;
+                    if (Array.isArray(step.codeLines)) {
+                        active = step.codeLines.includes(i);
+                    }
+                    if(active) {
+                        line.classList.add('active-line');
+                    } else {
+                        line.classList.remove('active-line');
+                    }
+                }
+            }
+
+            // Reset matrix highlights
+            document.querySelectorAll('.highlight-as').forEach(el => el.classList.remove('highlight-as'));
+            document.querySelectorAll('.highlight-as-light').forEach(el => el.classList.remove('highlight-as-light'));
+            document.querySelectorAll('.highlight-bs').forEach(el => el.classList.remove('highlight-bs'));
+            document.querySelectorAll('.highlight-res').forEach(el => el.classList.remove('highlight-res'));
+            document.querySelectorAll('.highlight-res-light').forEach(el => el.classList.remove('highlight-res-light'));
+            document.querySelectorAll('.highlight-c').forEach(el => el.classList.remove('highlight-c'));
+            document.querySelectorAll('.highlight-c-light').forEach(el => el.classList.remove('highlight-c-light'));
+
+            // Apply new matrix highlights
+            if (step.hlAs === 'all') {
+                document.querySelectorAll('[id^="as-"]').forEach(el => el.classList.add('highlight-as'));
+            } else if (step.hlAs) {
+                step.hlAs.forEach(([r, c]) => {
+                    const el = document.getElementById(`as-${r}-${c}`);
+                    if(el) el.classList.add('highlight-as');
+                });
+            }
+
+            if (step.hlAsLight) {
+                step.hlAsLight.forEach(([r, c]) => {
+                    const el = document.getElementById(`as-${r}-${c}`);
+                    if(el) el.classList.add('highlight-as-light');
+                });
+            }
+
+            if (step.hlBs === 'all') {
+                document.querySelectorAll('[id^="bs-"]').forEach(el => el.classList.add('highlight-bs'));
+            } else if (step.hlBs) {
+                step.hlBs.forEach(([r, c]) => {
+                    const el = document.getElementById(`bs-${r}-${c}`);
+                    if(el) el.classList.add('highlight-bs');
+                });
+            }
+
+            // Thread Results Highlights
+            if (step.hlRes === 'all') {
+                for(let i=0; i<4; i++) {
+                    const el = document.getElementById(`res-${i}`);
+                    if(el) el.classList.add('highlight-res');
+                }
+            } else if (Array.isArray(step.hlRes)) {
+                step.hlRes.forEach(resIdx => {
+                    const el = document.getElementById(`res-${resIdx}`);
+                    if(el) el.classList.add('highlight-res');
+                });
+            } else if(step.hlRes !== -1) {
+                const el = document.getElementById(`res-${step.hlRes}`);
+                if(el) el.classList.add('highlight-res');
+            }
+
+            if (Array.isArray(step.hlResLight)) {
+                step.hlResLight.forEach(resIdx => {
+                    const el = document.getElementById(`res-${resIdx}`);
+                    if(el) el.classList.add('highlight-res-light');
+                });
+            }
+
+            // Update Register B Glow & Reuse Badge
+            const regBEl = document.getElementById('reg-b');
+            if (regBEl) {
+                regBEl.innerText = step.regB;
+                
+                // Clear previous classes
+                regBEl.classList.remove('bg-emerald-200', 'border-emerald-400', 'scale-110', 'ring-4', 'ring-emerald-300', 'scale-105');
+
+                if (step.codeLines && step.codeLines.includes(4)) {
+                    // Just loaded
+                    regBEl.classList.add('bg-emerald-200', 'border-emerald-400', 'scale-110');
+                } else if (step.regBReuseText && step.regBReuseText.includes("Use")) {
+                    // Being actively reused
+                    regBEl.classList.add('ring-4', 'ring-emerald-300', 'scale-105');
+                }
+            }
+
+            const reuseEl = document.getElementById('reg-b-reuse');
+            if (reuseEl) {
+                if (step.regBReuseText) {
+                    reuseEl.innerText = step.regBReuseText;
+                    reuseEl.style.opacity = '1';
+                    reuseEl.style.transform = 'translateY(0)';
+                } else {
+                    reuseEl.style.opacity = '0';
+                    reuseEl.style.transform = 'translateY(-5px)';
+                }
+            }
+
+            // Update Results Array and Matrix C
+            for(let r=0; r<4; r++) {
+                const resEl = document.getElementById(`res-${r}`);
+                if(resEl) resEl.innerText = step.results[r];
+                
+                const globalRow = currentThread.r * 4 + r;
+                const globalCol = currentThread.c;
+                const cEl = document.getElementById(`c-${globalRow}-${globalCol}`);
+                if(cEl) cEl.innerText = step.results[r];
+            }
+
+            // Highlight Matrix C
+            if (step.hlRes === 'all') {
+                for(let i=0; i<4; i++) {
+                    const globalRow = currentThread.r * 4 + i;
+                    const globalCol = currentThread.c;
+                    const cEl = document.getElementById(`c-${globalRow}-${globalCol}`);
+                    if(cEl) cEl.classList.add('highlight-c');
+                }
+            } else if (Array.isArray(step.hlRes)) {
+                step.hlRes.forEach(resIdx => {
+                    const globalRow = currentThread.r * 4 + resIdx;
+                    const globalCol = currentThread.c;
+                    const cEl = document.getElementById(`c-${globalRow}-${globalCol}`);
+                    if(cEl) cEl.classList.add('highlight-c');
+                });
+            } else if(step.hlRes !== -1) {
+                const globalRow = currentThread.r * 4 + step.hlRes;
+                const globalCol = currentThread.c;
+                const cEl = document.getElementById(`c-${globalRow}-${globalCol}`);
+                if(cEl) cEl.classList.add('highlight-c');
+            }
+
+            if (Array.isArray(step.hlResLight)) {
+                step.hlResLight.forEach(resIdx => {
+                    const globalRow = currentThread.r * 4 + resIdx;
+                    const globalCol = currentThread.c;
+                    const cEl = document.getElementById(`c-${globalRow}-${globalCol}`);
+                    if(cEl) cEl.classList.add('highlight-c-light');
+                });
+            }
+
+            // Button states
+            const btnPrev = document.getElementById('btn-prev');
+            if (btnPrev) btnPrev.disabled = (stepIdx === 0);
+            
+            const btnReset = document.getElementById('btn-reset');
+            if (btnReset) btnReset.disabled = (stepIdx === 0);
+            
+            const btnNext = document.getElementById('btn-next');
+            if (btnNext) btnNext.disabled = (stepIdx === steps.length - 1);
+
+            // Auto-pause if we hit the end while playing
+            if (isPlaying && stepIdx === steps.length - 1) {
+                togglePlay();
+            }
+        }
+
+        // --- Controls ---
+        function nextStep() {
+            if (currentStep < steps.length - 1) {
+                currentStep++;
+                renderStep(currentStep);
+            }
+        }
+
+        function prevStep() {
+            if (currentStep > 0) {
+                currentStep--;
+                renderStep(currentStep);
+            }
+        }
+
+        function resetStep() {
+            if (isPlaying) togglePlay(); // Pause if playing
+            if (currentStep !== 0) {
+                currentStep = 0;
+                renderStep(currentStep);
+            }
+        }
+
+        function togglePlay() {
+            const playBtn = document.getElementById('btn-play');
+            
+            if (isPlaying) {
+                // Pause it
+                clearInterval(playInterval);
+                isPlaying = false;
+                playBtn.innerHTML = '&#x25B6; Play';
+                playBtn.classList.replace('bg-amber-100', 'bg-emerald-100');
+                playBtn.classList.replace('hover:bg-amber-200', 'hover:bg-emerald-200');
+                playBtn.classList.replace('text-amber-700', 'text-emerald-700');
+            } else {
+                // Play it
+                if (currentStep === steps.length - 1) {
+                    currentStep = 0; // Loop back to start if at the end
+                }
+                isPlaying = true;
+                playBtn.innerHTML = '&#x23F8; Pause';
+                playBtn.classList.replace('bg-emerald-100', 'bg-amber-100');
+                playBtn.classList.replace('hover:bg-emerald-200', 'hover:bg-amber-200');
+                playBtn.classList.replace('text-emerald-700', 'text-amber-700');
+                
+                renderStep(currentStep); // Initial render
+                playInterval = setInterval(() => {
+                    nextStep();
+                }, 1000); // 1 second per step
+            }
+        }
+
+        // Initialize
+        generateSteps();
+        initDOM();
+        renderStep(0);
+
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            if(e.key === 'ArrowRight') {
+                if(isPlaying) togglePlay();
+                nextStep();
+            }
+            if(e.key === 'ArrowLeft') {
+                if(isPlaying) togglePlay();
+                prevStep();
+            }
+        });
+
+    </script>
+</body>
+</html>

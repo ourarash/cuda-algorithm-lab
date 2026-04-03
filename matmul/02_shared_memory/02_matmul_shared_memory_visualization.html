@@ -36,6 +36,11 @@
         .active-shared-write { transform: scale(1.1); box-shadow: 0 0 10px rgba(234, 179, 8, 0.5); z-index: 10; border-color: #eab308; }
         .active-shared-read { transform: scale(1.1); box-shadow: 0 0 10px rgba(168, 85, 247, 0.5); z-index: 10; border-color: #a855f7; }
         .active-global-write { transform: scale(1.1); box-shadow: 0 0 10px rgba(59, 130, 246, 0.5); z-index: 10; background-color: #3b82f6; color: white; }
+        .selected-thread-path-a { box-shadow: inset 0 0 0 2px rgba(217, 119, 6, 0.45); }
+        .selected-thread-path-b { box-shadow: inset 0 0 0 2px rgba(124, 58, 237, 0.45); }
+        .selected-thread-current { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.55), 0 0 12px rgba(37, 99, 235, 0.25); z-index: 11; }
+        .selected-output-cell { box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.55); }
+        .thread-picker-btn.active { background-color: #1d4ed8; color: white; border-color: #1d4ed8; }
 
         .block-focus-overlay {
             position: absolute;
@@ -100,6 +105,42 @@
                     </div>
 
                     <div class="space-y-4">
+                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Problem Size</div>
+                                <div id="configSummary" class="text-[10px] font-mono text-slate-500">M=6, N=6, K=9, TILE=3</div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-3">
+                                <label class="text-[11px] font-medium text-slate-600">
+                                    M
+                                    <input id="inputM" type="number" min="1" max="10" value="6" class="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800">
+                                </label>
+                                <label class="text-[11px] font-medium text-slate-600">
+                                    N
+                                    <input id="inputN" type="number" min="1" max="10" value="6" class="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800">
+                                </label>
+                                <label class="text-[11px] font-medium text-slate-600">
+                                    K
+                                    <input id="inputK" type="number" min="1" max="10" value="9" class="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800">
+                                </label>
+                                <label class="text-[11px] font-medium text-slate-600">
+                                    Tile Size
+                                    <input id="inputTileSize" type="number" min="1" max="4" value="3" class="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-800">
+                                </label>
+                            </div>
+                            <div class="mt-3 flex items-center justify-between gap-3">
+                                <p class="text-[10px] text-slate-500">Use small sizes so the grids stay readable.</p>
+                                <button id="applyConfigBtn" class="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-slate-900">Apply</button>
+                            </div>
+                        </div>
+                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div class="flex items-center justify-between mb-2">
+                                <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Selected Thread</div>
+                                <div id="selectedThreadBadge" class="rounded bg-white px-2 py-1 text-[10px] font-mono text-slate-600 border">T(0,0)</div>
+                            </div>
+                            <div id="threadPicker" class="grid gap-2"></div>
+                            <p class="mt-2 text-[10px] text-slate-500">Pick a thread to follow across the full tile-local dot product.</p>
+                        </div>
                         <div>
                             <div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-1">
                                 <span>Speed</span><span id="speedVal">600ms</span>
@@ -117,21 +158,21 @@
 
                 <!-- Code View -->
                 <div class="bg-slate-900 text-slate-300 p-4 rounded-xl shadow-lg font-mono text-[10px] code-container border border-slate-700 flex-grow">
-                    <div class="text-slate-500 italic mb-2">// BlockDim=(2,2), TILE_SIZE=2</div>
+                    <div id="code-block-config" class="text-slate-500 italic mb-2">// BlockDim=(2,2), TILE_SIZE=2</div>
                     <div id="line-alloc" class="rounded px-1 transition duration-200 text-yellow-300">__shared__ float tileA[2][2];<br>__shared__ float tileB[2][2 + 1]; <span class="text-slate-500">// +1 Bank Padding</span></div>
                     <div class="h-2"></div>
                     <div id="line-global" class="rounded px-1 transition duration-200">int globalRow = blockIdx.y * 2 + threadIdx.y;<br>int globalCol = blockIdx.x * 2 + threadIdx.x;</div>
                     <div class="h-2"></div>
-                    <div id="line-loop-tile" class="rounded px-1 transition duration-200">for (int tileIdx = 0; tileIdx < K / 2; tileIdx++) {</div>
+                    <div id="line-loop-tile" class="rounded px-1 transition duration-200">for (int tileIdx = 0; tileIdx < ceil(K / 2); tileIdx++) {</div>
                     
                     <div id="line-load" class="rounded px-1 ml-4 transition duration-200 text-green-300">
-                        tileA[ty][tx] = A[globalRow * K + (tileIdx*2 + tx)];<br>
-                        tileB[ty][tx] = B[(tileIdx*2 + ty) * N + globalCol];
+                        tileA[ty][tx] = (globalRow &lt; M &amp;&amp; tileColA &lt; K) ? A[globalRow * K + tileColA] : 0;<br>
+                        tileB[ty][tx] = (tileRowB &lt; K &amp;&amp; globalCol &lt; N) ? B[tileRowB * N + globalCol] : 0;
                     </div>
                     
                     <div id="line-sync1" class="rounded px-1 ml-4 transition duration-200 text-red-400 font-bold">__syncthreads(); // Barrier</div>
                     <div class="h-1"></div>
-                    <div id="line-loop-k" class="rounded px-1 ml-4 transition duration-200">for (int k = 0; k < 2; k++) {</div>
+                    <div id="line-loop-k" class="rounded px-1 ml-4 transition duration-200">for (int k = 0; k &lt; 2; k++) {</div>
                     <div id="line-compute" class="rounded px-1 ml-8 transition duration-200 text-purple-300">partialSum += tileA[ty][k] * tileB[k][tx];</div>
                     <div class="rounded px-1 ml-4">}</div>
                     <div class="h-1"></div>
@@ -155,14 +196,14 @@
                             
                             <div class="flex flex-col items-center mt-2 space-y-6">
                                 <div class="flex flex-col items-center">
-                                    <span class="text-[10px] font-bold text-red-600 mb-1">Matrix A (4 × 8)</span>
+                                    <span id="labelMatrixA" class="text-[10px] font-bold text-red-600 mb-1">Matrix A (4 × 8)</span>
                                     <div class="relative">
                                         <div id="gridA" class="matrix-grid"></div>
                                         <div id="focusA" class="block-focus-overlay"></div>
                                     </div>
                                 </div>
                                 <div class="flex flex-col items-center">
-                                    <span class="text-[10px] font-bold text-green-600 mb-1">Matrix B (8 × 4)</span>
+                                    <span id="labelMatrixB" class="text-[10px] font-bold text-green-600 mb-1">Matrix B (8 × 4)</span>
                                     <div class="relative">
                                         <div id="gridB" class="matrix-grid"></div>
                                         <div id="focusB" class="block-focus-overlay"></div>
@@ -180,11 +221,11 @@
                                 
                                 <div class="flex justify-around items-center mt-4">
                                     <div class="flex flex-col items-center">
-                                        <span class="text-[10px] font-bold text-amber-700 mb-1">tileA [2][2]</span>
+                                        <span id="labelTileA" class="text-[10px] font-bold text-amber-700 mb-1">tileA [2][2]</span>
                                         <div id="gridSA" class="matrix-grid"></div>
                                     </div>
                                     <div class="flex flex-col items-center">
-                                        <span class="text-[10px] font-bold text-purple-700 mb-1">tileB [2][3] (Padded)</span>
+                                        <span id="labelTileB" class="text-[10px] font-bold text-purple-700 mb-1">tileB [2][3] (Padded)</span>
                                         <div id="gridSB" class="matrix-grid"></div>
                                     </div>
                                 </div>
@@ -195,7 +236,7 @@
                                 <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-blue-600 border border-blue-200 rounded-full shadow-sm">Registers & Matrix C</h3>
                                 
                                 <div class="flex flex-col items-center mt-2">
-                                    <span class="text-[10px] font-bold text-blue-800 mb-1">Matrix C (4 × 4)</span>
+                                    <span id="labelMatrixC" class="text-[10px] font-bold text-blue-800 mb-1">Matrix C (4 × 4)</span>
                                     <div class="relative">
                                         <div id="gridC" class="matrix-grid"></div>
                                         <div id="focusC" class="block-focus-overlay"></div>
@@ -210,8 +251,44 @@
                 <!-- Execution Monitor -->
                 <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
                     <div class="bg-slate-800 text-white px-4 py-2 flex justify-between items-center">
-                        <h3 class="text-sm font-bold">Block Thread Monitor (BlockDim = 2×2)</h3>
+                        <h3 id="monitorTitle" class="text-sm font-bold">Block Thread Monitor (BlockDim = 2×2)</h3>
                         <span class="text-[10px] bg-slate-600 px-2 py-0.5 rounded uppercase font-bold text-slate-200">Current Phase Details</span>
+                    </div>
+                    <div id="computeExplainBox" class="hidden border-b border-slate-200 bg-purple-50 px-4 py-3 text-[11px] text-slate-700">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div class="rounded-lg border border-purple-200 bg-white px-3 py-2">
+                                <div class="text-[10px] font-bold uppercase tracking-wider text-purple-600">Block View</div>
+                                <p id="computeBlockView" class="mt-1 leading-relaxed"></p>
+                            </div>
+                            <div class="rounded-lg border border-purple-200 bg-white px-3 py-2">
+                                <div class="text-[10px] font-bold uppercase tracking-wider text-purple-600">One Thread View</div>
+                                <p id="computeThreadView" class="mt-1 leading-relaxed"></p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="border-b border-slate-200 bg-slate-50 px-4 py-3">
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 text-[11px] text-slate-700">
+                            <div class="rounded-lg border border-slate-200 bg-white px-3 py-3">
+                                <div class="flex items-center justify-between">
+                                    <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Selected Thread Lens</div>
+                                    <div id="threadLensTarget" class="text-[10px] font-mono text-slate-500">T(0,0) -> C(0,0)</div>
+                                </div>
+                                <p id="threadLensSummary" class="mt-2 leading-relaxed text-slate-600"></p>
+                                <div class="mt-3">
+                                    <div class="text-[10px] font-bold uppercase tracking-wider text-amber-600">tileA Row</div>
+                                    <div id="threadRowA" class="mt-2 flex flex-wrap gap-2"></div>
+                                </div>
+                                <div class="mt-3">
+                                    <div class="text-[10px] font-bold uppercase tracking-wider text-purple-600">tileB Column</div>
+                                    <div id="threadColB" class="mt-2 flex flex-wrap gap-2"></div>
+                                </div>
+                            </div>
+                            <div class="rounded-lg border border-slate-200 bg-white px-3 py-3">
+                                <div class="text-[10px] font-bold uppercase tracking-wider text-slate-500">Dot Product Timeline</div>
+                                <div id="dotProductTerms" class="mt-3 flex flex-wrap gap-2"></div>
+                                <div id="threadAccumulator" class="mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-blue-800"></div>
+                            </div>
+                        </div>
                     </div>
                     <div class="p-0 overflow-x-auto">
                         <table class="w-full text-left text-[11px]">
@@ -243,6 +320,7 @@
                             <div class="bg-green-50 text-green-800 p-2 rounded border border-green-100 font-mono text-center">
                                 \(\text{DRAM Reads} = \frac{2 \times M \times N \times K}{\text{TILE_SIZE}}\)
                             </div>
+                            <p id="currentExampleMath" class="mt-2 text-[10px] text-slate-500">Current example: \(2 \times 4 \times 4 \times 8 / 2 = 128\) ideal DRAM reads.</p>
                         </div>
                     </div>
 
@@ -258,7 +336,7 @@
                     </div>
 
                     <div class="mt-4 bg-slate-50 p-3 rounded text-[11px] text-slate-600 border">
-                        <strong>Bank Conflicts & Padding:</strong> Notice <code>tileB</code> is sized <code>[2][3]</code> instead of <code>[2][2]</code>. Shared memory is divided into 32 banks. By adding a +1 padding column, we shift the memory addresses so that threads reading down a column of <code>tileB</code> don't hit the same hardware bank simultaneously, avoiding costly serialization.
+                        <strong>Bank Conflicts & Padding:</strong> <span id="paddingNote">Notice <code>tileB</code> is sized <code>[2][3]</code> instead of <code>[2][2]</code>.</span> Shared memory is divided into 32 banks. By adding a +1 padding column, we shift the memory addresses so that threads reading down a column of <code>tileB</code> don't hit the same hardware bank simultaneously, avoiding costly serialization.
                     </div>
                 </div>
 
@@ -267,11 +345,8 @@
     </div>
 
     <script>
-        // System Parameters
-        const M = 4, K = 8, N = 4;
-        const TILE_SIZE = 2;
-        const BLOCKS_X = N / TILE_SIZE; // 2
-        const BLOCKS_Y = M / TILE_SIZE; // 2
+        const DEFAULT_CONFIG = { M: 6, N: 6, K: 9, tileSize: 3 };
+        let params = { ...DEFAULT_CONFIG };
         
         let metrics = { global: 0, shared: 0 };
         let historyStack = [];
@@ -282,17 +357,244 @@
             tileIdx: 0, k: 0,
             phase: 'init', // init -> load -> sync1 -> compute -> sync2 -> store
             isPlaying: false, speed: 600,
-            partialSums: [0, 0, 0, 0] // For the 4 threads in the current block
+            partialSums: Array.from({ length: DEFAULT_CONFIG.tileSize * DEFAULT_CONFIG.tileSize }, () => 0),
+            selectedTx: 0, selectedTy: 0
         };
 
-        // Data Storage
         const DATA = {
-            A: Array.from({length: M}, () => Array.from({length: K}, () => Math.floor(Math.random() * 10))),
-            B: Array.from({length: K}, () => Array.from({length: N}, () => Math.floor(Math.random() * 10))),
-            C: Array.from({length: M}, () => Array.from({length: N}, () => 0)),
-            tileA: [[0,0],[0,0]],
-            tileB: [[0,0,0],[0,0,0]] // padded
+            A: [],
+            B: [],
+            C: [],
+            tileA: [],
+            tileB: []
         };
+
+        function blockCountX() {
+            return Math.ceil(params.N / params.tileSize);
+        }
+
+        function blockCountY() {
+            return Math.ceil(params.M / params.tileSize);
+        }
+
+        function tileCountK() {
+            return Math.ceil(params.K / params.tileSize);
+        }
+
+        function zeroMatrix(rows, cols) {
+            return Array.from({ length: rows }, () => Array.from({ length: cols }, () => 0));
+        }
+
+        function makeRandomMatrix(rows, cols) {
+            return Array.from({ length: rows }, () =>
+                Array.from({ length: cols }, () => Math.floor(Math.random() * 10))
+            );
+        }
+
+        function resetData() {
+            DATA.A = makeRandomMatrix(params.M, params.K);
+            DATA.B = makeRandomMatrix(params.K, params.N);
+            DATA.C = zeroMatrix(params.M, params.N);
+            DATA.tileA = zeroMatrix(params.tileSize, params.tileSize);
+            DATA.tileB = zeroMatrix(params.tileSize, params.tileSize + 1);
+        }
+
+        function selectedTid() {
+            return state.selectedTy * params.tileSize + state.selectedTx;
+        }
+
+        function clampSelectedThread() {
+            state.selectedTx = Math.max(0, Math.min(params.tileSize - 1, state.selectedTx));
+            state.selectedTy = Math.max(0, Math.min(params.tileSize - 1, state.selectedTy));
+        }
+
+        function effectiveTileIdxForLens() {
+            if (state.phase === 'store' || state.phase === 'done') {
+                return Math.max(0, tileCountK() - 1);
+            }
+            return Math.max(0, Math.min(state.tileIdx, tileCountK() - 1));
+        }
+
+        function previewTileVectorsForThread(tx, ty, tileIdx) {
+            const gRow = state.blockY * params.tileSize + ty;
+            const gCol = state.blockX * params.tileSize + tx;
+            const rowA = [];
+            const colB = [];
+
+            for (let k = 0; k < params.tileSize; k++) {
+                const aCol = tileIdx * params.tileSize + k;
+                const bRow = tileIdx * params.tileSize + k;
+                rowA.push(gRow < params.M && aCol < params.K ? DATA.A[gRow][aCol] : 0);
+                colB.push(bRow < params.K && gCol < params.N ? DATA.B[bRow][gCol] : 0);
+            }
+
+            return { rowA, colB, gRow, gCol };
+        }
+
+        function renderThreadPicker() {
+            const picker = document.getElementById('threadPicker');
+            const badge = document.getElementById('selectedThreadBadge');
+            if (!picker) return;
+            picker.innerHTML = '';
+            picker.style.gridTemplateColumns = `repeat(${params.tileSize}, minmax(0, 1fr))`;
+
+            for (let ty = 0; ty < params.tileSize; ty++) {
+                for (let tx = 0; tx < params.tileSize; tx++) {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'thread-picker-btn rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-mono text-slate-700 transition-colors hover:border-blue-400 hover:text-blue-700';
+                    btn.textContent = `T(${tx},${ty})`;
+                    if (tx === state.selectedTx && ty === state.selectedTy) {
+                        btn.classList.add('active');
+                    }
+                    btn.addEventListener('click', () => {
+                        state.selectedTx = tx;
+                        state.selectedTy = ty;
+                        renderThreadPicker();
+                        updateUI();
+                    });
+                    picker.appendChild(btn);
+                }
+            }
+
+            if (badge) {
+                badge.textContent = `T(${state.selectedTx},${state.selectedTy})`;
+            }
+        }
+
+        function renderThreadLens() {
+            const target = document.getElementById('threadLensTarget');
+            const summary = document.getElementById('threadLensSummary');
+            const rowA = document.getElementById('threadRowA');
+            const colB = document.getElementById('threadColB');
+            const terms = document.getElementById('dotProductTerms');
+            const accumulator = document.getElementById('threadAccumulator');
+            if (!target || !summary || !rowA || !colB || !terms || !accumulator) return;
+
+            const tx = state.selectedTx;
+            const ty = state.selectedTy;
+            const tileIdx = effectiveTileIdxForLens();
+            const preview = previewTileVectorsForThread(tx, ty, tileIdx);
+            const gRow = preview.gRow;
+            const gCol = preview.gCol;
+            const tid = selectedTid();
+            const inBounds = gRow < params.M && gCol < params.N;
+            const activeK = state.phase === 'compute' ? state.k : -1;
+            const loadACol = tileIdx * params.tileSize + tx;
+            const loadBRow = tileIdx * params.tileSize + ty;
+
+            target.textContent = `T(${tx},${ty}) -> C(${gRow},${gCol})`;
+            if (!inBounds) {
+                summary.textContent = `This thread lands outside the current output bounds for this edge tile, so it only participates with padded zeros.`;
+            } else if (state.phase === 'init') {
+                summary.textContent = `This thread owns C(${gRow},${gCol}). Next it will help load tile ${tileIdx} from global memory into shared memory.`;
+            } else if (state.phase === 'load') {
+                summary.textContent = `This thread is loading one A value and one B value for tile ${tileIdx}: A(${gRow},${loadACol}) -> tileA[${ty}][${tx}] and B(${loadBRow},${gCol}) -> tileB[${ty}][${tx}].`;
+            } else if (state.phase === 'sync1') {
+                summary.textContent = `The tile values are now in shared memory. This thread waits here until every thread in the block finishes the load phase.`;
+            } else if (state.phase === 'compute') {
+                summary.textContent = `This thread is building one tile-local dot product by walking across row ${ty} of tileA and down column ${tx} of tileB.`;
+            } else if (state.phase === 'sync2') {
+                summary.textContent = `This thread finished the current tile-local dot product work and now waits before the block either loads the next K tile or moves on to the store.`;
+            } else if (state.phase === 'store') {
+                summary.textContent = `All tile contributions for this block are complete. This thread writes its accumulated partialSum into C(${gRow},${gCol}).`;
+            } else {
+                summary.textContent = `This thread has finished its work for the current block.`;
+            }
+
+            rowA.innerHTML = '';
+            colB.innerHTML = '';
+            terms.innerHTML = '';
+
+            for (let k = 0; k < params.tileSize; k++) {
+                const aVal = preview.rowA[k];
+                const bVal = preview.colB[k];
+
+                const aChip = document.createElement('div');
+                aChip.className = 'rounded border border-amber-200 bg-amber-50 px-2 py-1 font-mono text-[10px] text-amber-800';
+                if (k === activeK) aChip.classList.add('ring-2', 'ring-blue-400');
+                aChip.textContent = `A[${ty}][${k}] = ${aVal}`;
+                rowA.appendChild(aChip);
+
+                const bChip = document.createElement('div');
+                bChip.className = 'rounded border border-purple-200 bg-purple-50 px-2 py-1 font-mono text-[10px] text-purple-800';
+                if (k === activeK) bChip.classList.add('ring-2', 'ring-blue-400');
+                bChip.textContent = `B[${k}][${tx}] = ${bVal}`;
+                colB.appendChild(bChip);
+
+                const term = document.createElement('div');
+                term.className = 'rounded border px-2 py-1 font-mono text-[10px]';
+                let status = 'future';
+                if (state.phase === 'compute') {
+                    status = k < state.k ? 'done' : k === state.k ? 'current' : 'future';
+                } else if (state.phase === 'sync2' || state.phase === 'store' || state.phase === 'done') {
+                    status = 'done';
+                }
+
+                if (status === 'done') {
+                    term.className += ' border-green-200 bg-green-50 text-green-800';
+                } else if (status === 'current') {
+                    term.className += ' border-blue-200 bg-blue-50 text-blue-800';
+                } else {
+                    term.className += ' border-slate-200 bg-slate-50 text-slate-500';
+                }
+                term.textContent = `${aVal} × ${bVal} = ${aVal * bVal}`;
+                terms.appendChild(term);
+            }
+
+            const running = state.partialSums[tid] ?? 0;
+            if (!inBounds) {
+                accumulator.innerHTML = `<strong>Thread state:</strong> out-of-bounds for this block edge, so any loads or writes are masked to zero.`;
+            } else if (state.phase === 'init') {
+                accumulator.innerHTML = `<strong>Thread role:</strong> owns <code>C(${gRow},${gCol})</code> and is about to begin loading tile <code>${tileIdx}</code>.`;
+            } else if (state.phase === 'load') {
+                const loadAVal = gRow < params.M && loadACol < params.K ? DATA.A[gRow][loadACol] : 0;
+                const loadBVal = loadBRow < params.K && gCol < params.N ? DATA.B[loadBRow][gCol] : 0;
+                accumulator.innerHTML = `<strong>Current load:</strong> <code>A(${gRow},${loadACol}) = ${loadAVal}</code> and <code>B(${loadBRow},${gCol}) = ${loadBVal}</code> are being copied into shared memory.`;
+            } else if (state.phase === 'sync1') {
+                accumulator.innerHTML = `<strong>Barrier:</strong> waiting for every thread to finish loading before compute begins.`;
+            } else if (state.phase === 'compute') {
+                accumulator.innerHTML = `<strong>Current step:</strong> add <code>tileA[${ty}][${state.k}] * tileB[${state.k}][${tx}]</code>.<br><strong>Running partialSum:</strong> ${running}`;
+            } else if (state.phase === 'sync2') {
+                accumulator.innerHTML = `<strong>Barrier:</strong> this tile's math is complete for the block. Current partialSum for this thread is <strong>${running}</strong>.`;
+            } else if (state.phase === 'store') {
+                accumulator.innerHTML = `<strong>Thread result:</strong> this thread is ready to write <code>C(${gRow},${gCol}) = ${running}</code>.`;
+            } else {
+                accumulator.innerHTML = `<strong>Running partialSum:</strong> ${running}`;
+            }
+        }
+
+        function cellClassForGrid(maxDim) {
+            if (maxDim >= 10) return 'w-7 h-7 md:w-8 md:h-8 text-[9px]';
+            if (maxDim >= 7) return 'w-8 h-8 md:w-9 md:h-9 text-[10px]';
+            return 'w-10 h-10 md:w-11 md:h-11 text-[11px]';
+        }
+
+        function updateStaticLabels() {
+            const blockDim = `${params.tileSize}×${params.tileSize}`;
+            document.getElementById('configSummary').textContent = `M=${params.M}, N=${params.N}, K=${params.K}, TILE=${params.tileSize}`;
+            document.getElementById('labelMatrixA').textContent = `Matrix A (${params.M} × ${params.K})`;
+            document.getElementById('labelMatrixB').textContent = `Matrix B (${params.K} × ${params.N})`;
+            document.getElementById('labelMatrixC').textContent = `Matrix C (${params.M} × ${params.N})`;
+            document.getElementById('labelTileA').textContent = `tileA [${params.tileSize}][${params.tileSize}]`;
+            document.getElementById('labelTileB').textContent = `tileB [${params.tileSize}][${params.tileSize + 1}] (Padded)`;
+            document.getElementById('monitorTitle').textContent = `Block Thread Monitor (BlockDim = ${blockDim})`;
+            document.getElementById('code-block-config').textContent = `// BlockDim=(${params.tileSize},${params.tileSize}), TILE_SIZE=${params.tileSize}`;
+            document.getElementById('line-alloc').innerHTML = `__shared__ float tileA[${params.tileSize}][${params.tileSize}];<br>__shared__ float tileB[${params.tileSize}][${params.tileSize} + 1]; <span class="text-slate-500">// +1 Bank Padding</span>`;
+            document.getElementById('line-global').innerHTML = `int globalRow = blockIdx.y * ${params.tileSize} + threadIdx.y;<br>int globalCol = blockIdx.x * ${params.tileSize} + threadIdx.x;`;
+            document.getElementById('line-loop-tile').textContent = `for (int tileIdx = 0; tileIdx < ceil(K / ${params.tileSize}); tileIdx++) {`;
+            document.getElementById('line-loop-k').textContent = `for (int k = 0; k < ${params.tileSize}; k++) {`;
+            document.getElementById('paddingNote').innerHTML = `Notice <code>tileB</code> is sized <code>[${params.tileSize}][${params.tileSize + 1}]</code> instead of <code>[${params.tileSize}][${params.tileSize}]</code>.`;
+
+            const idealReads = (2 * params.M * params.N * params.K) / params.tileSize;
+            const currentExampleMath = document.getElementById('currentExampleMath');
+            currentExampleMath.textContent = `Current example: 2 × ${params.M} × ${params.N} × ${params.K} / ${params.tileSize} = ${idealReads} ideal DRAM reads.`;
+            if (window.MathJax?.typesetPromise) {
+                window.MathJax.typesetPromise([currentExampleMath]).catch(() => {});
+            }
+
+            renderThreadPicker();
+        }
 
         // Initialize DOM Elements
         function initGrids() {
@@ -301,15 +603,16 @@
                 if (!el) return;
                 el.innerHTML = '';
                 el.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+                const sizeClass = cellClassForGrid(Math.max(rows, cols, params.tileSize));
                 
                 for (let r = 0; r < rows; r++) {
                     for (let c = 0; c < cols; c++) {
                         const cell = document.createElement('div');
                         if (c === padCol) {
-                            cell.className = `cell cell-pad w-5 h-5 md:w-6 md:h-6`;
+                            cell.className = `cell cell-pad ${sizeClass}`;
                             cell.title = "Padding to prevent bank conflicts";
                         } else {
-                            cell.className = `cell cell-${type} w-5 h-5 md:w-6 md:h-6`;
+                            cell.className = `cell cell-${type} ${sizeClass}`;
                             cell.id = `${type}-${r}-${c}`;
                             // Init values
                             if (type === 'a') cell.textContent = DATA.A[r][c];
@@ -322,11 +625,11 @@
                 }
             };
 
-            createGrid('gridA', M, K, 'a');
-            createGrid('gridB', K, N, 'b');
-            createGrid('gridC', M, N, 'c');
-            createGrid('gridSA', TILE_SIZE, TILE_SIZE, 'sa');
-            createGrid('gridSB', TILE_SIZE, TILE_SIZE + 1, 'sb', 2); // col 2 is pad
+            createGrid('gridA', params.M, params.K, 'a');
+            createGrid('gridB', params.K, params.N, 'b');
+            createGrid('gridC', params.M, params.N, 'c');
+            createGrid('gridSA', params.tileSize, params.tileSize, 'sa');
+            createGrid('gridSB', params.tileSize, params.tileSize + 1, 'sb', params.tileSize);
             
             updateOverlays();
         }
@@ -363,7 +666,7 @@
             }
 
             // Overlay C is static per block
-            placeOverlay('focusC', 'gridC', state.blockY * TILE_SIZE, state.blockX * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            placeOverlay('focusC', 'gridC', state.blockY * params.tileSize, state.blockX * params.tileSize, Math.min(params.tileSize, params.M - state.blockY * params.tileSize), Math.min(params.tileSize, params.N - state.blockX * params.tileSize));
             const fc = document.getElementById('focusC');
             if(fc) fc.style.opacity = 1;
             
@@ -373,8 +676,8 @@
                 const fb = document.getElementById('focusB');
                 if(fa) fa.style.opacity = 1;
                 if(fb) fb.style.opacity = 1;
-                placeOverlay('focusA', 'gridA', state.blockY * TILE_SIZE, state.tileIdx * TILE_SIZE, TILE_SIZE, TILE_SIZE);
-                placeOverlay('focusB', 'gridB', state.tileIdx * TILE_SIZE, state.blockX * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                placeOverlay('focusA', 'gridA', state.blockY * params.tileSize, state.tileIdx * params.tileSize, Math.min(params.tileSize, params.M - state.blockY * params.tileSize), Math.min(params.tileSize, params.K - state.tileIdx * params.tileSize));
+                placeOverlay('focusB', 'gridB', state.tileIdx * params.tileSize, state.blockX * params.tileSize, Math.min(params.tileSize, params.K - state.tileIdx * params.tileSize), Math.min(params.tileSize, params.N - state.blockX * params.tileSize));
             } else {
                 const fa = document.getElementById('focusA');
                 const fb = document.getElementById('focusB');
@@ -394,14 +697,19 @@
         function updateUI() {
             // Clean all cell highlights
             document.querySelectorAll('.cell').forEach(c => {
-                c.classList.remove('active-global-read', 'active-shared-write', 'active-shared-read', 'active-global-write', 'anim-compute');
+                c.classList.remove('active-global-read', 'active-shared-write', 'active-shared-read', 'active-global-write', 'anim-compute', 'selected-thread-path-a', 'selected-thread-path-b', 'selected-thread-current', 'selected-output-cell');
             });
             
             updateOverlays();
 
             const pInd = document.getElementById('phaseIndicator');
             const tbody = document.getElementById('monitorBody');
+            const computeExplainBox = document.getElementById('computeExplainBox');
+            const computeBlockView = document.getElementById('computeBlockView');
+            const computeThreadView = document.getElementById('computeThreadView');
             let actionHeader = "Action";
+
+            if (computeExplainBox) computeExplainBox.classList.add('hidden');
 
             if (state.phase === 'init') {
                 highlightCode('line-global');
@@ -429,6 +737,17 @@
                     pInd.className = "px-2 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-bold uppercase tracking-widest";
                 }
                 actionHeader = "Shared \u2192 Register Math";
+                if (computeExplainBox && computeBlockView && computeThreadView) {
+                    computeExplainBox.classList.remove('hidden');
+                    const sampleTx = state.selectedTx;
+                    const sampleTy = state.selectedTy;
+                    const sampleRow = state.blockY * params.tileSize + sampleTy;
+                    const sampleCol = state.blockX * params.tileSize + sampleTx;
+                    const sampleA = DATA.tileA[sampleTy]?.[state.k] ?? 0;
+                    const sampleB = DATA.tileB[state.k]?.[sampleTx] ?? 0;
+                    computeBlockView.innerHTML = `At fixed <code>k=${state.k}</code>, the whole block reads <strong>column ${state.k}</strong> of <code>tileA</code> and <strong>row ${state.k}</strong> of <code>tileB</code>. That is why you see one highlighted column in A and one highlighted row in B.`;
+                    computeThreadView.innerHTML = `A single thread still updates just one output cell. Example: <code>T(${sampleTx},${sampleTy})</code> contributes to <code>C(${sampleRow},${sampleCol})</code> with <code>tileA[${sampleTy}][${state.k}] * tileB[${state.k}][${sampleTx}] = ${sampleA} * ${sampleB}</code>. Across the full loop, that same thread builds one row-by-column dot product.`;
+                }
             } else if (state.phase === 'sync2') {
                 highlightCode('line-sync2');
                 if(pInd) {
@@ -452,17 +771,26 @@
 
             const headerEl = document.getElementById('monitorActionHeader');
             if(headerEl) headerEl.textContent = actionHeader;
+
+            const selectedGlobalRow = state.blockY * params.tileSize + state.selectedTy;
+            const selectedGlobalCol = state.blockX * params.tileSize + state.selectedTx;
+            document.getElementById(`c-${selectedGlobalRow}-${selectedGlobalCol}`)?.classList.add('selected-output-cell');
+
+            for (let k = 0; k < params.tileSize; k++) {
+                document.getElementById(`sa-${state.selectedTy}-${k}`)?.classList.add('selected-thread-path-a');
+                document.getElementById(`sb-${k}-${state.selectedTx}`)?.classList.add('selected-thread-path-b');
+            }
             
             if(tbody) tbody.innerHTML = '';
 
             // Generate Monitor Rows & Apply Cell Highlights
-            for (let ty = 0; ty < TILE_SIZE; ty++) {
-                for (let tx = 0; tx < TILE_SIZE; tx++) {
-                    const tid = ty * 2 + tx;
-                    const gRow = state.blockY * TILE_SIZE + ty;
-                    const gCol = state.blockX * TILE_SIZE + tx;
-                    const aCol = state.tileIdx * TILE_SIZE + tx;
-                    const bRow = state.tileIdx * TILE_SIZE + ty;
+            for (let ty = 0; ty < params.tileSize; ty++) {
+                for (let tx = 0; tx < params.tileSize; tx++) {
+                    const tid = ty * params.tileSize + tx;
+                    const gRow = state.blockY * params.tileSize + ty;
+                    const gCol = state.blockX * params.tileSize + tx;
+                    const aCol = state.tileIdx * params.tileSize + tx;
+                    const bRow = state.tileIdx * params.tileSize + ty;
                     
                     const row = document.createElement('tr');
                     row.className = "border-b border-slate-100";
@@ -478,8 +806,8 @@
                         saCell?.classList.add('active-shared-write');
                         sbCell?.classList.add('active-shared-write');
                         
-                        const safeValA = (gRow < M && aCol < K && DATA.A[gRow]) ? DATA.A[gRow][aCol] : 0;
-                        const safeValB = (bRow < K && gCol < N && DATA.B[bRow]) ? DATA.B[bRow][gCol] : 0;
+                        const safeValA = (gRow < params.M && aCol < params.K && DATA.A[gRow]) ? DATA.A[gRow][aCol] : 0;
+                        const safeValB = (bRow < params.K && gCol < params.N && DATA.B[bRow]) ? DATA.B[bRow][gCol] : 0;
                         
                         if(saCell) saCell.textContent = safeValA;
                         if(sbCell) sbCell.textContent = safeValB;
@@ -492,8 +820,11 @@
                         
                         const vA = DATA.tileA[ty][state.k];
                         const vB = DATA.tileB[state.k][tx];
-                        actionHtml = `<span class="text-purple-600 font-bold">${vA} &times; ${vB} = ${vA*vB}</span>`;
+                        actionHtml = `<span class="text-purple-700 font-bold">C(${gRow},${gCol}) += tileA[${ty}][${state.k}] &times; tileB[${state.k}][${tx}]</span><br><span class="text-purple-500">${vA} &times; ${vB} = ${vA * vB}</span>`;
                         row.classList.add('bg-purple-50');
+                        if (tx === state.selectedTx && ty === state.selectedTy) {
+                            row.classList.add('ring-1', 'ring-inset', 'ring-purple-300');
+                        }
                     }
                     else if (state.phase === 'store') {
                         const cCell = document.getElementById(`c-${gRow}-${gCol}`);
@@ -505,6 +836,9 @@
                     }
 
                     if (tbody) {
+                        if (tx === state.selectedTx && ty === state.selectedTy) {
+                            row.classList.add('bg-blue-50');
+                        }
                         row.innerHTML = `
                             <th class="px-4 py-2 text-slate-500 italic font-mono text-[10px]">T(${tx},${ty})</th>
                             <td class="px-4 py-2 font-mono">C(${gRow},${gCol})</td>
@@ -540,6 +874,14 @@
             const ms = document.getElementById('metricShared');
             if(mg) mg.textContent = metrics.global;
             if(ms) ms.textContent = metrics.shared;
+
+            if (state.phase === 'compute') {
+                document.getElementById(`sa-${state.selectedTy}-${state.k}`)?.classList.add('selected-thread-current');
+                document.getElementById(`sb-${state.k}-${state.selectedTx}`)?.classList.add('selected-thread-current');
+            }
+
+            renderThreadPicker();
+            renderThreadLens();
         }
 
         function saveState() {
@@ -563,22 +905,23 @@
             DATA.tileA = prev.tileA;
             DATA.tileB = prev.tileB;
             DATA.C = prev.C;
+            clampSelectedThread();
 
             // Restore Grid C display
-            for (let r = 0; r < M; r++) {
-                for (let c = 0; c < N; c++) {
+            for (let r = 0; r < params.M; r++) {
+                for (let c = 0; c < params.N; c++) {
                     const cell = document.getElementById(`c-${r}-${c}`);
                     if (cell) cell.textContent = DATA.C[r][c];
                 }
             }
             
             // Restore Shared Memory display
-            for(let r=0; r<TILE_SIZE; r++) {
-                for(let c=0; c<TILE_SIZE; c++) {
+            for(let r=0; r<params.tileSize; r++) {
+                for(let c=0; c<params.tileSize; c++) {
                     const sa = document.getElementById(`sa-${r}-${c}`);
                     if (sa) sa.textContent = DATA.tileA[r][c];
                 }
-                for(let c=0; c<TILE_SIZE+1; c++) {
+                for(let c=0; c<params.tileSize+1; c++) {
                     const sb = document.getElementById(`sb-${r}-${c}`);
                     if (sb) sb.textContent = DATA.tileB[r][c] || '0';
                 }
@@ -593,19 +936,25 @@
                 state.phase = 'load';
             } 
             else if (state.phase === 'load') {
+                let globalReads = 0;
                 // Populate physical tile data with safety bounds
-                for (let ty = 0; ty < TILE_SIZE; ty++) {
-                    for (let tx = 0; tx < TILE_SIZE; tx++) {
-                        const gRow = state.blockY * TILE_SIZE + ty;
-                        const gCol = state.blockX * TILE_SIZE + tx;
-                        const aCol = state.tileIdx * TILE_SIZE + tx;
-                        const bRow = state.tileIdx * TILE_SIZE + ty;
+                for (let ty = 0; ty < params.tileSize; ty++) {
+                    for (let tx = 0; tx < params.tileSize; tx++) {
+                        const gRow = state.blockY * params.tileSize + ty;
+                        const gCol = state.blockX * params.tileSize + tx;
+                        const aCol = state.tileIdx * params.tileSize + tx;
+                        const bRow = state.tileIdx * params.tileSize + ty;
                         
-                        DATA.tileA[ty][tx] = (gRow < M && aCol < K && DATA.A[gRow]) ? DATA.A[gRow][aCol] : 0;
-                        DATA.tileB[ty][tx] = (bRow < K && gCol < N && DATA.B[bRow]) ? DATA.B[bRow][gCol] : 0;
+                        const readA = (gRow < params.M && aCol < params.K && DATA.A[gRow]);
+                        const readB = (bRow < params.K && gCol < params.N && DATA.B[bRow]);
+
+                        DATA.tileA[ty][tx] = readA ? DATA.A[gRow][aCol] : 0;
+                        DATA.tileB[ty][tx] = readB ? DATA.B[bRow][gCol] : 0;
+                        if (readA) globalReads++;
+                        if (readB) globalReads++;
                     }
                 }
-                metrics.global += 8; // 4 threads * 2 loads
+                metrics.global += globalReads;
                 state.phase = 'sync1';
             } 
             else if (state.phase === 'sync1') {
@@ -613,54 +962,56 @@
                 state.k = 0;
             } 
             else if (state.phase === 'compute') {
-                for (let ty = 0; ty < TILE_SIZE; ty++) {
-                    for (let tx = 0; tx < TILE_SIZE; tx++) {
-                        const tid = ty * 2 + tx;
+                for (let ty = 0; ty < params.tileSize; ty++) {
+                    for (let tx = 0; tx < params.tileSize; tx++) {
+                        const tid = ty * params.tileSize + tx;
                         state.partialSums[tid] += DATA.tileA[ty][state.k] * DATA.tileB[state.k][tx];
                     }
                 }
-                metrics.shared += 8; // 4 threads * 2 reads from shared memory
+                metrics.shared += params.tileSize * params.tileSize * 2;
                 
                 state.k++;
-                if (state.k >= TILE_SIZE) {
+                if (state.k >= params.tileSize) {
                     state.phase = 'sync2';
                 }
             } 
             else if (state.phase === 'sync2') {
                 state.tileIdx++;
-                if (state.tileIdx >= K / TILE_SIZE) {
+                if (state.tileIdx >= tileCountK()) {
                     state.phase = 'store';
                 } else {
                     state.phase = 'load';
                 }
             } 
             else if (state.phase === 'store') {
-                for (let ty = 0; ty < TILE_SIZE; ty++) {
-                    for (let tx = 0; tx < TILE_SIZE; tx++) {
-                        const gRow = state.blockY * TILE_SIZE + ty;
-                        const gCol = state.blockX * TILE_SIZE + tx;
-                        const tid = ty * 2 + tx;
-                        if (gRow < M && gCol < N && DATA.C[gRow]) {
+                let globalWrites = 0;
+                for (let ty = 0; ty < params.tileSize; ty++) {
+                    for (let tx = 0; tx < params.tileSize; tx++) {
+                        const gRow = state.blockY * params.tileSize + ty;
+                        const gCol = state.blockX * params.tileSize + tx;
+                        const tid = ty * params.tileSize + tx;
+                        if (gRow < params.M && gCol < params.N && DATA.C[gRow]) {
                             DATA.C[gRow][gCol] = state.partialSums[tid];
+                            globalWrites++;
                         }
                     }
                 }
-                metrics.global += 4; // 4 global writes
+                metrics.global += globalWrites;
                 
                 // Halt at the end of the block computation to let user review
                 if(state.isPlaying) togglePlay(); 
                 
                 // Advance the block pointers automatically for the next go-around
                 state.blockX++;
-                if (state.blockX >= BLOCKS_X) {
+                if (state.blockX >= blockCountX()) {
                     state.blockX = 0;
                     state.blockY++;
-                    if (state.blockY >= BLOCKS_Y) {
+                    if (state.blockY >= blockCountY()) {
                         state.phase = 'done';
                         
                         // Clear the visual shared memory blocks
-                        for(let r=0; r<TILE_SIZE; r++) {
-                            for(let c=0; c<TILE_SIZE; c++) {
+                        for(let r=0; r<params.tileSize; r++) {
+                            for(let c=0; c<params.tileSize; c++) {
                                 const sa = document.getElementById(`sa-${r}-${c}`);
                                 const sb = document.getElementById(`sb-${r}-${c}`);
                                 if(sa) sa.textContent = '0';
@@ -674,11 +1025,11 @@
                 state.tileIdx = 0;
                 state.k = 0;
                 state.phase = 'init';
-                state.partialSums = [0, 0, 0, 0];
+                state.partialSums = Array.from({ length: params.tileSize * params.tileSize }, () => 0);
                 
                 // Clear the visual shared memory blocks
-                for(let r=0; r<TILE_SIZE; r++) {
-                    for(let c=0; c<TILE_SIZE; c++) {
+                for(let r=0; r<params.tileSize; r++) {
+                    for(let c=0; c<params.tileSize; c++) {
                         const sa = document.getElementById(`sa-${r}-${c}`);
                         const sb = document.getElementById(`sb-${r}-${c}`);
                         if(sa) sa.textContent = '0';
@@ -696,16 +1047,16 @@
             if (state.phase === 'done') return;
             saveState();
             state.blockX++;
-            if (state.blockX >= BLOCKS_X) {
+            if (state.blockX >= blockCountX()) {
                 state.blockX = 0;
                 state.blockY++;
-                if (state.blockY >= BLOCKS_Y) {
+                if (state.blockY >= blockCountY()) {
                     state.phase = 'done';
                     if (state.isPlaying) togglePlay();
                     
                     // Clear shared memory display
-                    for(let r=0; r<TILE_SIZE; r++) {
-                        for(let c=0; c<TILE_SIZE; c++) {
+                    for(let r=0; r<params.tileSize; r++) {
+                        for(let c=0; c<params.tileSize; c++) {
                             const sa = document.getElementById(`sa-${r}-${c}`);
                             const sb = document.getElementById(`sb-${r}-${c}`);
                             if(sa) sa.textContent = '0';
@@ -719,11 +1070,11 @@
             state.tileIdx = 0;
             state.k = 0;
             state.phase = 'init';
-            state.partialSums = [0, 0, 0, 0];
+            state.partialSums = Array.from({ length: params.tileSize * params.tileSize }, () => 0);
             
             // Clear shared memory display
-            for(let r=0; r<TILE_SIZE; r++) {
-                for(let c=0; c<TILE_SIZE; c++) {
+            for(let r=0; r<params.tileSize; r++) {
+                for(let c=0; c<params.tileSize; c++) {
                     const sa = document.getElementById(`sa-${r}-${c}`);
                     const sb = document.getElementById(`sb-${r}-${c}`);
                     if(sa) sa.textContent = '0';
@@ -735,10 +1086,15 @@
         }
 
         function resetSim() {
+            const preservedTx = Math.min(state.selectedTx, params.tileSize - 1);
+            const preservedTy = Math.min(state.selectedTy, params.tileSize - 1);
             state = {
                 blockX: 0, blockY: 0, tileIdx: 0, k: 0,
                 isPlaying: false, speed: document.getElementById('speedSlider')?.value || 600, 
-                warpMode: true, phase: 'init', partialSums: [0, 0, 0, 0]
+                warpMode: true, phase: 'init',
+                partialSums: Array.from({ length: params.tileSize * params.tileSize }, () => 0),
+                selectedTx: preservedTx,
+                selectedTy: preservedTy
             };
             metrics = { global: 0, shared: 0 };
             historyStack = [];
@@ -746,10 +1102,25 @@
             if(playIcon) playIcon.textContent = '▶ Play';
             if(timer) clearInterval(timer);
             
-            // Reset C
-            DATA.C = Array.from({length: M}, () => Array.from({length: N}, () => 0));
+            resetData();
+            updateStaticLabels();
             initGrids();
             updateUI();
+        }
+
+        function applyConfig() {
+            const nextM = Math.max(1, Math.min(10, parseInt(document.getElementById('inputM')?.value || params.M, 10)));
+            const nextN = Math.max(1, Math.min(10, parseInt(document.getElementById('inputN')?.value || params.N, 10)));
+            const nextK = Math.max(1, Math.min(10, parseInt(document.getElementById('inputK')?.value || params.K, 10)));
+            const nextTile = Math.max(1, Math.min(4, parseInt(document.getElementById('inputTileSize')?.value || params.tileSize, 10)));
+
+            document.getElementById('inputM').value = nextM;
+            document.getElementById('inputN').value = nextN;
+            document.getElementById('inputK').value = nextK;
+            document.getElementById('inputTileSize').value = nextTile;
+
+            params = { M: nextM, N: nextN, K: nextK, tileSize: nextTile };
+            resetSim();
         }
 
         let timer;
@@ -773,6 +1144,9 @@
         
         const globalResetBtn = document.getElementById('resetBtn');
         if(globalResetBtn) globalResetBtn.onclick = resetSim;
+
+        const globalApplyConfigBtn = document.getElementById('applyConfigBtn');
+        if(globalApplyConfigBtn) globalApplyConfigBtn.onclick = applyConfig;
         
         const globalSpeedSlider = document.getElementById('speedSlider');
         if(globalSpeedSlider) {
@@ -786,6 +1160,8 @@
 
         // Bootstrap
         window.addEventListener('DOMContentLoaded', () => {
+            resetData();
+            updateStaticLabels();
             initGrids();
             // Give DOM a tiny bit to render grids before calculating overlay positions
             setTimeout(updateUI, 50);

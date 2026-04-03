@@ -45,7 +45,13 @@
 __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
                              const float *B, float beta, float *C) {
   // Allocate shared memory for tiles of A and B.
-  // Padding tileB by 1 column prevents shared memory bank conflicts when threads access it.
+  // We only pad tileB because of how the compute loop reads the two tiles:
+  //   partialSum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
+  // For tileA, a warp reads across a row at fixed k, which is already a
+  // row-major, conflict-friendly access pattern. For tileB, threads read down
+  // a logical column as k changes. Without padding, that column access can map
+  // many threads onto the same shared-memory bank. Adding +1 to tileB's stride
+  // shifts each row start into a different bank, breaking that conflict pattern.
   __shared__ float tileA[TILE_SIZE][TILE_SIZE];
   __shared__ float tileB[TILE_SIZE][TILE_SIZE + 1];
 
@@ -88,7 +94,10 @@ __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
     // Wait for all threads in the block to finish loading their elements into shared memory
     __syncthreads();
 
-    // Multiply row of A with column of B
+    // Each thread builds one tile-local dot product: over the full k loop, it
+    // walks across one row of tileA and down one column of tileB.
+    // At any single fixed k, though, the block collectively touches the k-th
+    // column of tileA and the k-th row of tileB.
     for (int k = 0; k < TILE_SIZE; k++) {
       partialSum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
     }

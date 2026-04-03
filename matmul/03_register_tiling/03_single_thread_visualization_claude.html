@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Register-Tiled MatMul: Single Thread View</title>
+<style>
+:root {
+  --cell: 38px;
+  --bg: #0f172a;
+  --sf: #1e293b;
+  --sf2: #334155;
+  --tx: #e2e8f0;
+  --dim: #94a3b8;
+  --red: #ef4444; --grn: #22c55e; --blu: #3b82f6;
+  --org: #f97316; --pur: #a855f7; --yel: #eab308; --cyn: #22d3ee;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--tx);
+  min-height: 100vh; padding: 20px;
+}
+.container { max-width: 1200px; margin: 0 auto; }
+header { text-align: center; margin-bottom: 16px; }
+header h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+.params {
+  font-size: 12px; color: var(--dim);
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* Step bar */
+.step-bar {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--sf); border-radius: 8px;
+  padding: 10px 16px; margin-bottom: 12px;
+}
+.step-title { font-size: 15px; font-weight: 600; }
+.step-num { font-size: 12px; color: var(--dim); }
+
+/* Description */
+.desc {
+  font-size: 13px; line-height: 1.7; color: var(--dim);
+  text-align: center; margin-bottom: 14px; max-width: 800px;
+  margin-left: auto; margin-right: auto;
+}
+.desc b { color: var(--tx); font-weight: 600; }
+
+/* Matrix panels */
+.row {
+  display: flex; gap: 16px; justify-content: center;
+  flex-wrap: wrap; margin-bottom: 14px;
+}
+.panel { background: var(--sf); border-radius: 8px; padding: 10px; }
+.panel h3 {
+  font-size: 12px; font-weight: 500; text-align: center;
+  margin-bottom: 6px; font-family: 'SF Mono', monospace;
+}
+.grid { display: grid; gap: 2px; }
+
+/* Cells */
+.cell {
+  width: var(--cell); height: var(--cell);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600; border-radius: 3px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  position: relative;
+  transition: background 0.25s, border-color 0.25s, color 0.25s,
+              transform 0.25s, box-shadow 0.25s;
+  border: 1.5px solid transparent;
+}
+
+/* A cells (red) */
+.ca  { background: #1c1215; color: #fca5a5; border-color: #2a1a1a; }
+.ca.hl { background: #3b1111; border-color: var(--red); color: #fecaca; }
+
+/* B cells (green) */
+.cb  { background: #111c15; color: #86efac; border-color: #1a2a1a; }
+.cb.hl { background: #0d3320; border-color: var(--grn); color: #bbf7d0; }
+
+/* C cells (blue) */
+.cc  { background: #111528; color: #93c5fd; border-color: #1a1a3a; }
+.cc.thr { background: #172554; border-color: var(--blu); color: #bfdbfe; }
+.cc.wr {
+  background: var(--blu); color: #fff; border-color: var(--blu);
+  box-shadow: 0 0 10px rgba(59,130,246,0.5);
+  transform: scale(1.08); z-index: 1;
+}
+
+/* Shared-memory A (orange) */
+.csa { background: #1c1810; color: #fdba74; border-color: #2a2210; }
+.csa.ld { background: #2a2010; border-color: var(--org); }
+.csa.rd {
+  background: var(--org); color: #fff; border-color: var(--org);
+  box-shadow: 0 0 10px rgba(249,115,22,0.5);
+  transform: scale(1.08); z-index: 1;
+}
+.csa.dm { opacity: 0.25; }
+
+/* Shared-memory B (purple) */
+.csb { background: #1a1225; color: #d8b4fe; border-color: #2a1a3a; }
+.csb.ld { background: #2a1a3a; border-color: var(--pur); }
+.csb.rd {
+  background: var(--pur); color: #fff; border-color: var(--pur);
+  box-shadow: 0 0 10px rgba(168,85,247,0.5);
+  transform: scale(1.08); z-index: 1;
+}
+
+/* Registers bar */
+.reg-bar {
+  display: flex; gap: 12px; justify-content: center;
+  align-items: center; flex-wrap: wrap; margin-bottom: 14px;
+}
+.reg-item { display: flex; align-items: center; gap: 6px; }
+.reg-name {
+  font-size: 11px; color: var(--dim);
+  font-family: 'SF Mono', monospace;
+}
+.reg-val {
+  font-family: 'SF Mono', monospace; font-size: 12px; font-weight: 700;
+  padding: 4px 10px; border-radius: 4px;
+  min-width: 36px; text-align: center; transition: all 0.3s;
+}
+.rv-b { background: #1a1225; color: #d8b4fe; border: 1.5px solid #2a1a3a; }
+.rv-b.on {
+  background: var(--pur); color: #fff; border-color: var(--pur);
+  box-shadow: 0 0 8px rgba(168,85,247,0.4);
+}
+.rv-t { background: #1c1a10; color: #fcd34d; border: 1.5px solid #3a3010; }
+.rv-t.up { background: #854d0e; border-color: var(--yel); color: #fef08a; }
+.reg-sep { color: var(--sf2); font-size: 18px; user-select: none; }
+
+/* Operations panel */
+.ops {
+  background: var(--sf); border-radius: 8px; padding: 14px 18px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px; line-height: 1.8; margin-bottom: 14px;
+}
+.ops > div { min-height: 0.2em; }
+.ops .lb { color: var(--cyn); font-weight: 600; }
+.ops .vl { color: var(--yel); font-weight: 700; }
+.ops .dm { color: var(--dim); }
+.ops .insight {
+  color: var(--cyn); margin-top: 8px; padding: 6px 10px;
+  background: rgba(34,211,238,0.08);
+  border-left: 3px solid var(--cyn); border-radius: 0 4px 4px 0;
+  font-style: italic;
+}
+
+.hidden { display: none !important; }
+
+/* Controls */
+.controls {
+  display: flex; align-items: center; gap: 14px; justify-content: center;
+}
+.controls button {
+  background: var(--sf); color: var(--tx);
+  border: 1px solid var(--sf2);
+  padding: 8px 20px; border-radius: 6px; cursor: pointer;
+  font-size: 13px; font-weight: 500; transition: background 0.2s;
+}
+.controls button:hover:not(:disabled) { background: var(--sf2); }
+.controls button:disabled { opacity: 0.3; cursor: not-allowed; }
+.pbar {
+  flex: 1; max-width: 260px; height: 4px;
+  background: var(--sf); border-radius: 2px; overflow: hidden;
+}
+.pfill {
+  height: 100%; background: var(--blu);
+  border-radius: 2px; transition: width 0.3s;
+}
+.kbd {
+  font-size: 11px; color: var(--dim);
+  text-align: center; margin-top: 10px;
+}
+
+@media (max-width: 1100px) {
+  :root { --cell: 30px; }
+  .cell { font-size: 9px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Register-Tiled MatMul: What One Thread Does</h1>
+    <div class="params">
+      M=8 &nbsp;N=8 &nbsp;K=8 &nbsp;|&nbsp; BM=8 &nbsp;BN=4 &nbsp;BK=4 &nbsp;TM=4
+      &nbsp;|&nbsp; Block(0,0) &nbsp;Thread(row=0, col=0)
+    </div>
+  </header>
+
+  <div class="step-bar">
+    <span class="step-title" id="title"></span>
+    <span class="step-num" id="snum"></span>
+  </div>
+  <div class="desc" id="desc"></div>
+
+  <!-- Global matrices -->
+  <div class="row">
+    <div class="panel">
+      <h3 style="color:#fca5a5">A [8&times;8]</h3>
+      <div class="grid" id="gA"></div>
+    </div>
+    <div class="panel">
+      <h3 style="color:#86efac">B [8&times;8]</h3>
+      <div class="grid" id="gB"></div>
+    </div>
+    <div class="panel">
+      <h3 style="color:#93c5fd">C [8&times;8] &mdash; output</h3>
+      <div class="grid" id="gC"></div>
+    </div>
+  </div>
+
+  <!-- Shared memory -->
+  <div class="row" id="smRow">
+    <div class="panel">
+      <h3 style="color:#fdba74">As [8&times;4] &mdash; shared memory</h3>
+      <div class="grid" id="sA"></div>
+    </div>
+    <div class="panel">
+      <h3 style="color:#d8b4fe">Bs [4&times;4] &mdash; shared memory</h3>
+      <div class="grid" id="sB"></div>
+    </div>
+  </div>
+
+  <!-- Registers -->
+  <div class="reg-bar" id="regs"></div>
+
+  <!-- Operations -->
+  <div class="ops" id="ops"></div>
+
+  <!-- Navigation -->
+  <div class="controls">
+    <button id="bk" onclick="go(-1)">&larr; Back</button>
+    <div class="pbar"><div class="pfill" id="pf"></div></div>
+    <button id="fw" onclick="go(1)">Next &rarr;</button>
+  </div>
+  <div class="kbd">&larr; &rarr; arrow keys &nbsp;or&nbsp; Space to navigate</div>
+</div>
+
+<script>
+// ============================================================
+//  Constants
+// ============================================================
+const M = 8, N = 8, K = 8;
+const BM = 8, BN = 4, BK = 4, TM = 4;
+const tRow = 0, tCol = 0;            // thread under observation
+
+// ============================================================
+//  Generate matrix data
+// ============================================================
+const A = [], B = [], C = [];
+for (let i = 0; i < M; i++) {
+  A[i] = [];
+  for (let j = 0; j < K; j++) A[i][j] = ((i + j) % 4) + 1;   // 1–4
+}
+for (let i = 0; i < K; i++) {
+  B[i] = [];
+  for (let j = 0; j < N; j++) B[i][j] = ((i * 2 + j) % 3) + 1; // 1–3
+}
+for (let i = 0; i < M; i++) {
+  C[i] = [];
+  for (let j = 0; j < N; j++) {
+    let s = 0;
+    for (let k = 0; k < K; k++) s += A[i][k] * B[k][j];
+    C[i][j] = s;
+  }
+}
+
+// ============================================================
+//  Build all steps
+// ============================================================
+function buildSteps() {
+  const S = [];
+  const tr = [0, 0, 0, 0];
+  const tCells = Array.from({length: TM}, (_, ri) => [tRow * TM + ri, tCol]);
+
+  // --- Step 0: Overview ---
+  S.push({
+    t: "Overview: Thread(0,0)'s Job",
+    d: `Thread(0,0) computes <b>TM=${TM} elements</b> of C: ` +
+       `column ${tCol}, rows ${tRow*TM}&ndash;${tRow*TM+TM-1}.<br><br>` +
+       `The K=${K} dot product is split into <b>${K/BK} tiles</b> of BK=${BK}. ` +
+       `Inside each tile, two nested loops:<br>` +
+       `&bull; <b>dotIdx</b> (${BK} iters) &mdash; steps through K within the tile (dot-product accumulation)<br>` +
+       `&bull; <b>resultIndex</b> (${TM} iters) &mdash; reuses the same B value across ${TM} output rows ` +
+       `(register tiling)`,
+    tr: [...tr], pt: null, rb: null,
+    As: null, Bs: null,
+    aT: [], bT: [],
+    cHL: tCells, cM: 'thr',
+    saHL: [], sbHL: [], saD: [],
+    ops: []
+  });
+
+  // --- K-tile loop ---
+  for (let bk = 0; bk < K; bk += BK) {
+    const tn = bk / BK;
+
+    // Build shared-memory contents
+    const As = [], Bs = [];
+    for (let r = 0; r < BM; r++) {
+      As[r] = [];
+      for (let c = 0; c < BK; c++) As[r][c] = A[r][bk + c];
+    }
+    for (let r = 0; r < BK; r++) {
+      Bs[r] = [];
+      for (let c = 0; c < BN; c++) Bs[r][c] = B[bk + r][c];
+    }
+
+    // Tile highlights on global matrices
+    const aT = [], bT = [];
+    for (let r = 0; r < BM; r++)
+      for (let c = bk; c < bk + BK; c++) aT.push([r, c]);
+    for (let r = bk; r < bk + BK; r++)
+      for (let c = 0; c < BN; c++) bT.push([r, c]);
+
+    // --- Load step ---
+    S.push({
+      t: `K-tile ${tn}: Load Shared Memory (bkIdx=${bk})`,
+      d: `All threads cooperate to load ` +
+         `A[:, ${bk}:${bk+BK}] &rarr; As[${BM}][${BK}] and ` +
+         `B[${bk}:${bk+BK}, 0:${BN}] &rarr; Bs[${BK}][${BN}]. ` +
+         `Then <b>__syncthreads()</b> ensures the tile is ready.`,
+      tr: [...tr], pt: null, rb: null,
+      As, Bs,
+      aT, bT,
+      cHL: tCells, cM: 'thr',
+      saHL: 'all', sbHL: 'all', saD: [],
+      ops: [
+        `<span class="lb">Cooperative tile load</span>`,
+        `As[${BM}][${BK}] &larr; A[:, ${bk}:${bk+BK}]`,
+        `Bs[${BK}][${BN}] &larr; B[${bk}:${bk+BK}, 0:${BN}]`,
+        `__syncthreads()`
+      ]
+    });
+
+    // --- Compute steps (one per dotIdx) ---
+    for (let di = 0; di < BK; di++) {
+      const rb = Bs[di][tCol];
+      const pt = [...tr];
+      const saHL = [];
+      const ops = [];
+
+      ops.push(`<span class="lb">&oplus; Load B value into register</span>`);
+      ops.push(`&nbsp;&nbsp; regB = Bs[${di}][${tCol}] = <span class="vl">${rb}</span>`);
+      ops.push(`<span class="lb">&oplus; resultIndex loop (TM=${TM} multiply-accumulates, same regB)</span>`);
+
+      for (let ri = 0; ri < TM; ri++) {
+        const ar = tRow * TM + ri;
+        const av = As[ar][di];
+        const p = av * rb;
+        tr[ri] += p;
+        saHL.push([ar, di]);
+        ops.push(
+          `&nbsp;&nbsp; threadResults[${ri}] += As[${ar}][${di}] &times; regB` +
+          ` = ${av} &times; ${rb} = ${p}` +
+          `  <span class="dm">&rarr; ${tr[ri]}</span>`
+        );
+      }
+
+      ops.push(
+        `<div class="insight">` +
+        `1 shared-memory read from Bs &rarr; ${TM} multiply-adds. ` +
+        `regB reused ${TM}&times; &mdash; that's the register tiling win.</div>`
+      );
+
+      S.push({
+        t: `K-tile ${tn}, dotIdx=${di}`,
+        d: `<b>dotIdx=${di}</b> &mdash; selects column ${di} of As and row ${di} of Bs.<br>` +
+           `<b>resultIndex 0&ndash;${TM-1}</b> &mdash; multiplies ${TM} values from that As column by the same regB.`,
+        tr: [...tr], pt, rb,
+        As, Bs,
+        aT, bT,
+        cHL: tCells, cM: 'thr',
+        saHL, sbHL: [[di, tCol]],
+        saD: Array.from({length: BM - TM}, (_, i) => TM + i),
+        ops
+      });
+    }
+  }
+
+  // --- Write-back step ---
+  const wops = [`<span class="lb">Write registers &rarr; global memory C</span>`];
+  for (let ri = 0; ri < TM; ri++) {
+    const r = tRow * TM + ri;
+    const ok = tr[ri] === C[r][tCol];
+    wops.push(
+      `&nbsp;&nbsp; C[${r}][${tCol}] = threadResults[${ri}]` +
+      ` = <span class="vl">${tr[ri]}</span>` +
+      `  ${ok ? '&#10003;' : '&#10007;'}`
+    );
+  }
+  S.push({
+    t: "Write Results Back to C",
+    d: `Accumulation complete. Thread(0,0) writes its ${TM} register values to global memory C.`,
+    tr: [...tr], pt: null, rb: null,
+    As: null, Bs: null,
+    aT: [], bT: [],
+    cHL: tCells, cM: 'wr',
+    saHL: [], sbHL: [], saD: [],
+    ops: wops
+  });
+
+  return S;
+}
+
+const steps = buildSteps();
+let cur = 0;
+
+// ============================================================
+//  Rendering helpers
+// ============================================================
+function mkSet(hl, rows, cols) {
+  const s = new Set();
+  if (hl === 'all') {
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++) s.add(r + ',' + c);
+  } else if (Array.isArray(hl)) {
+    hl.forEach(([r, c]) => s.add(r + ',' + c));
+  }
+  return s;
+}
+
+function renderGrid(id, data, rows, cols, cls, hl, hlCls, dim, prefix) {
+  const g = document.getElementById(id);
+  g.innerHTML = '';
+  g.style.gridTemplateColumns = `repeat(${cols}, var(--cell))`;
+  const hs = mkSet(hl, rows, cols);
+  const ds = new Set(dim || []);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const d = document.createElement('div');
+      d.className = 'cell ' + cls;
+      if (hs.has(r + ',' + c)) d.classList.add(hlCls);
+      if (ds.has(r)) d.classList.add('dm');
+      d.textContent = data[r][c];
+      d.title = `${prefix}[${r}][${c}] = ${data[r][c]}`;
+      g.appendChild(d);
+    }
+  }
+}
+
+function renderC(hl, mode) {
+  const g = document.getElementById('gC');
+  g.innerHTML = '';
+  g.style.gridTemplateColumns = `repeat(${N}, var(--cell))`;
+  const hs = mkSet(hl, M, N);
+  for (let r = 0; r < M; r++) {
+    for (let c = 0; c < N; c++) {
+      const d = document.createElement('div');
+      d.className = 'cell cc';
+      if (hs.has(r + ',' + c)) d.classList.add(mode);
+      d.textContent = C[r][c];
+      d.title = `C[${r}][${c}] = ${C[r][c]}`;
+      g.appendChild(d);
+    }
+  }
+}
+
+function renderRegs(tr, pt, rb) {
+  const g = document.getElementById('regs');
+  g.innerHTML = '';
+  // regB
+  const ri = document.createElement('div');
+  ri.className = 'reg-item';
+  ri.innerHTML =
+    `<span class="reg-name">regB</span>` +
+    `<span class="reg-val rv-b${rb !== null ? ' on' : ''}">${rb !== null ? rb : '—'}</span>`;
+  g.appendChild(ri);
+
+  const sep = document.createElement('span');
+  sep.className = 'reg-sep';
+  sep.textContent = '│';
+  g.appendChild(sep);
+
+  // threadResults
+  for (let i = 0; i < TM; i++) {
+    const upd = pt && pt[i] !== tr[i];
+    const d = document.createElement('div');
+    d.className = 'reg-item';
+    d.innerHTML =
+      `<span class="reg-name">tr[${i}]</span>` +
+      `<span class="reg-val rv-t${upd ? ' up' : ''}">${tr[i]}</span>`;
+    g.appendChild(d);
+  }
+}
+
+// ============================================================
+//  Main render
+// ============================================================
+function render(idx) {
+  const s = steps[idx];
+  document.getElementById('title').textContent = s.t;
+  document.getElementById('snum').textContent = `Step ${idx + 1} / ${steps.length}`;
+  document.getElementById('desc').innerHTML = s.d;
+  document.getElementById('pf').style.width = ((idx + 1) / steps.length * 100) + '%';
+
+  // Global matrices
+  renderGrid('gA', A, M, K, 'ca', s.aT, 'hl', [], 'A');
+  renderGrid('gB', B, K, N, 'cb', s.bT, 'hl', [], 'B');
+  renderC(s.cHL, s.cM);
+
+  // Shared memory
+  const sr = document.getElementById('smRow');
+  if (s.As) {
+    sr.classList.remove('hidden');
+    const saClass = s.saHL === 'all' ? 'ld' : 'rd';
+    const sbClass = s.sbHL === 'all' ? 'ld' : 'rd';
+    renderGrid('sA', s.As, BM, BK, 'csa', s.saHL, saClass, s.saD, 'As');
+    renderGrid('sB', s.Bs, BK, BN, 'csb', s.sbHL, sbClass, [], 'Bs');
+  } else {
+    sr.classList.add('hidden');
+  }
+
+  // Registers
+  renderRegs(s.tr, s.pt, s.rb);
+
+  // Operations
+  const op = document.getElementById('ops');
+  if (s.ops.length) {
+    op.classList.remove('hidden');
+    op.innerHTML = s.ops.map(l => '<div>' + l + '</div>').join('');
+  } else {
+    op.classList.add('hidden');
+  }
+
+  // Button state
+  document.getElementById('bk').disabled = idx === 0;
+  document.getElementById('fw').disabled = idx === steps.length - 1;
+}
+
+// ============================================================
+//  Navigation
+// ============================================================
+function go(d) {
+  const n = cur + d;
+  if (n >= 0 && n < steps.length) { cur = n; render(cur); }
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { go(1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft') { go(-1); e.preventDefault(); }
+});
+
+// Initial render
+render(0);
+</script>
+</body>
+</html>
