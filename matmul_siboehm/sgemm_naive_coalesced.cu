@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: Naive But Coalesced
+ *
+ * Intention:
+ * This version keeps the naive one-thread-per-output structure but improves
+ * the thread mapping so global memory accesses are warp-friendly.
+ *
+ * High-Level Algorithm:
+ * - Assign one thread to one output element C[i, j].
+ * - Map threadIdx.x to columns so neighboring lanes access neighboring memory.
+ * - Compute the dot product directly from global memory.
+ * - Use this version to isolate the benefit of coalescing.
+ */
 #include <cassert>
 #include <cmath>
 #include <cuda_runtime.h>

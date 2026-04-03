@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: Shared-Memory Tiling
+ *
+ * Intention:
+ * This version introduces classic shared-memory tiling so blocks can reuse
+ * data instead of rereading the same values from global memory.
+ *
+ * High-Level Algorithm:
+ * - Assign each thread block to one output tile of C.
+ * - Load matching A and B tiles into shared memory.
+ * - Reuse those tiles for a full inner-product step.
+ * - Repeat across the K dimension and then write the finished C tile.
+ */
 #include <cassert>
 #include <cmath>
 #include <cstdlib>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CUDA Clarity Helper"
+  short_description: "Comment and readability assistant for cuda-algorithm-lab"
+  default_prompt: "Use $cuda-clarity-helper to add or improve comments, file-level intent summaries, and high-level algorithm explanations in this repository."

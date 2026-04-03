@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: 1D Register Tiling
+ *
+ * Intention:
+ * This version increases work per thread so each thread computes a small
+ * vertical strip of output values in registers.
+ *
+ * High-Level Algorithm:
+ * - Tile A and B through shared memory.
+ * - Let each thread own TM outputs instead of just one.
+ * - Keep those partial sums in registers across the full K-tile loop.
+ * - Write the register results back at the end.
+ */
 #include <cassert>
 #include <cmath>
 #include <cstdlib>

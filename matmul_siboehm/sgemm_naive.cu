@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: Naive Baseline
+ *
+ * Intention:
+ * This is the simplest GEMM kernel in the Siboehm study series. It exists as a
+ * baseline to compare against later coalesced and tiled versions.
+ *
+ * High-Level Algorithm:
+ * - Assign one thread to one output element C[i, j].
+ * - Walk across the full K dimension in a scalar loop.
+ * - Accumulate the dot product directly from global memory.
+ * - Write the final result back to C.
+ */
 #include <cuda_runtime.h>
 
 #include <cassert>

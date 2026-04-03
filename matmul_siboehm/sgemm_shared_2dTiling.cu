@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: 2D Register Tiling
+ *
+ * Intention:
+ * This version extends register tiling from a 1D strip to a 2D patch so each
+ * thread produces a small tile of the final matrix.
+ *
+ * High-Level Algorithm:
+ * - Stage block tiles of A and B in shared memory.
+ * - Load a tiny TM x TN work tile into registers per thread.
+ * - Accumulate that tile across the K dimension.
+ * - Store the completed TM x TN patch back into C.
+ */
 #include <cassert>
 #include <cmath>
 #include <cstdlib>

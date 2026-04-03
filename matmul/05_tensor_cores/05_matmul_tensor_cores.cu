@@ -1,3 +1,16 @@
+/*
+ * Tensor Core Matrix Multiplication
+ *
+ * Intention:
+ * This file demonstrates how to move from custom CUDA cores to NVIDIA Tensor
+ * Cores through the WMMA API.
+ *
+ * High-Level Algorithm:
+ * - Assign each warp to one 16x16 output tile.
+ * - Load 16x16 fragments of A and B into WMMA fragments.
+ * - Let the hardware perform matrix multiply-accumulate on Tensor Cores.
+ * - Store the accumulated FP32 output fragment back to global memory.
+ */
 #include <cmath>
 #include <cstdlib>
 #include <cuda_runtime.h>
@@ -21,7 +34,7 @@ using namespace nvcuda;
 #define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
 
 /**
- * 5. Hardware Acceleration (WMMA API / Tensor Cores)
+ * 6. Hardware Acceleration (WMMA API / Tensor Cores)
  * This version targets NVIDIA's specialized Tensor Cores. It uses the Warp Matrix 
  * Multiply-Accumulate (WMMA) API to program an entire warp (32 threads) to natively
  * execute mixed-precision (FP16 inputs to FP32 accumulate) matrix operations.

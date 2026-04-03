@@ -1,3 +1,17 @@
+/*
+ * Shared Memory Tiled Matrix Multiplication
+ *
+ * Intention:
+ * This file introduces block tiling with shared memory to reduce redundant
+ * global-memory traffic.
+ *
+ * High-Level Algorithm:
+ * - Assign each thread block to one output tile of C.
+ * - Cooperatively load one tile of A and one tile of B into shared memory.
+ * - Reuse those tiles for many multiply-accumulate operations before loading
+ *   the next K tile.
+ * - Pad the B tile by one column to avoid shared-memory bank conflicts.
+ */
 #include <cmath>
 #include <cstdlib>
 #include <cuda_runtime.h>
@@ -21,10 +35,12 @@
 /**
  * 2. Shared Memory Tiling Approach
  * This kernel uses Shared Memory to drastically reduce global memory accesses.
- * Threads within a block cooperatively load a tile of A and B into ultra-fast
- * shared memory, reuse it for their dot product calculations, and pad the B
- * tile by 1 column to avoid shared memory bank conflicts. Each thread computes
- * one element of C.
+ * Each thread block is assigned to one tile of the output matrix C, and each
+ * thread in that block computes one element within that C tile.
+ * Threads within the block cooperatively load the corresponding tiles of A and
+ * B into ultra-fast shared memory, reuse them for their dot product
+ * calculations, and pad the B tile by 1 column to avoid shared memory bank
+ * conflicts.
  */
 __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
                              const float *B, float beta, float *C) {
@@ -39,13 +55,20 @@ __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
 
   float partialSum = 0.0f;
 
-  // Loop over tiles along the shared dimension
+  // Loop over the tiles of the shared K dimension.
+  // This block owns one TILE_SIZE x TILE_SIZE output tile of C, but computing
+  // that tile requires accumulating products across the full K dimension.
+  // In each iteration, the block loads one tile of A and one tile of B into
+  // shared memory, computes this tile's partial contribution to C, and then
+  // moves to the next K tile.
   for (int tileIdx = 0; tileIdx < K / TILE_SIZE; tileIdx++) {
-    // Compute global indices for the current tile of A
+    // Each thread loads one element of the current A tile.
     int aRow = globalRow;
     int aCol = tileIdx * TILE_SIZE + threadIdx.x;
 
-    // Compute global indices for the current tile of B
+    // Each thread also loads one element of the current B tile.
+    // Over the full loop, each thread loads multiple A/B elements, one pair
+    // per tileIdx iteration.
     int bRow = tileIdx * TILE_SIZE + threadIdx.y;
     int bCol = globalCol;
 

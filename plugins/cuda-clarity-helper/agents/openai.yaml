@@ -1,0 +1,4 @@
+interface:
+  display_name: "CUDA Clarity Helper"
+  short_description: "Improve CUDA readability and comments for this repository"
+  default_prompt: "Use $cuda-clarity-helper to improve comments, file-level intent summaries, and overall readability in this CUDA repository."

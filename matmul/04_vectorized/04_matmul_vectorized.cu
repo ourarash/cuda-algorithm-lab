@@ -1,3 +1,17 @@
+/*
+ * Vectorized Matrix Multiplication
+ *
+ * Intention:
+ * This file widens memory accesses with float4 loads and stores to improve
+ * memory throughput compared with the scalar shared-memory version.
+ *
+ * High-Level Algorithm:
+ * - Keep the tiled shared-memory structure from earlier GEMM kernels.
+ * - Load B in float4 chunks so each thread fetches four neighboring values at
+ *   once.
+ * - Accumulate four outputs per thread in registers.
+ * - Store the result back with vector-friendly access patterns.
+ */
 #include <cmath>
 #include <cstdlib>
 #include <cuda_runtime.h>
@@ -19,7 +33,7 @@
 #define TILE_SIZE 32 // Tile size for shared memory
 
 /**
- * 4. Vectorized Memory Access Approach (`float4`)
+ * 5. Vectorized Memory Access Approach (`float4`)
  * This kernel improves memory throughput by fetching 128-bit blocks (four 32-bit
  * floats) from global memory at once using the `float4` built-in type. 
  * It also computes 4 output values per thread (instruction-level parallelism) 

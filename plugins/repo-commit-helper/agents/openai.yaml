@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Commit Helper"
+  short_description: "Draft or make commits for this CUDA repository"
+  default_prompt: "Use $repo-commit-helper to prepare a repo-aware Conventional Commit for this CUDA repository, and if nothing is staged ask whether to stage all current changes first."

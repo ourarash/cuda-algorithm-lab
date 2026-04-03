@@ -1,3 +1,17 @@
+/*
+ * Siboehm GEMM: Shared Memory With Padding
+ *
+ * Intention:
+ * This version keeps shared-memory tiling but adds padding to reduce
+ * shared-memory bank conflicts.
+ *
+ * High-Level Algorithm:
+ * - Load A and B tiles into shared memory.
+ * - Pad one shared-memory dimension so neighboring threads stop colliding on
+ *   the same bank.
+ * - Compute the tiled matrix product from the padded shared-memory tiles.
+ * - Write the final output tile back to C.
+ */
 #include <cassert>
 #include <cmath>
 #include <cstdlib>

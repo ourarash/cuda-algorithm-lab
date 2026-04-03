@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Commit Helper"
+  short_description: "Commit assistant for cuda-algorithm-lab"
+  default_prompt: "Use $repo-commit-helper to analyze staged changes, ask to stage all if nothing is staged, and draft or make a Conventional Commit for this CUDA repo."

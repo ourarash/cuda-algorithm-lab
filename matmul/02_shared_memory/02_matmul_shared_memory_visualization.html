@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA SGEMM: Shared Memory Tiling Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        .matrix-grid { display: grid; gap: 2px; }
+        .cell {
+            aspect-ratio: 1/1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 600;
+            border-radius: 3px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        
+        /* Global Memory Cells */
+        .cell-a { background-color: #fee2e2; border: 1px solid #fecaca; color: #7f1d1d; }
+        .cell-b { background-color: #dcfce7; border: 1px solid #bbf7d0; color: #14532d; }
+        .cell-c { background-color: #dbeafe; border: 1px solid #bfdbfe; color: #1e3a8a; }
+        
+        /* Shared Memory Cells */
+        .cell-sa { background-color: #ffedd5; border: 1px solid #fde047; color: #713f12; }
+        .cell-sb { background-color: #f3e8ff; border: 1px solid #d8b4fe; color: #4c1d95; }
+        .cell-pad { background-color: #f1f5f9; border: 1px dashed #cbd5e1; color: #94a3b8; background-image: repeating-linear-gradient(45deg, transparent, transparent 2px, #e2e8f0 2px, #e2e8f0 4px); }
+
+        /* Highlights */
+        .active-global-read { transform: scale(1.1); box-shadow: 0 0 10px rgba(0,0,0,0.2); z-index: 10; filter: brightness(0.9); }
+        .active-shared-write { transform: scale(1.1); box-shadow: 0 0 10px rgba(234, 179, 8, 0.5); z-index: 10; border-color: #eab308; }
+        .active-shared-read { transform: scale(1.1); box-shadow: 0 0 10px rgba(168, 85, 247, 0.5); z-index: 10; border-color: #a855f7; }
+        .active-global-write { transform: scale(1.1); box-shadow: 0 0 10px rgba(59, 130, 246, 0.5); z-index: 10; background-color: #3b82f6; color: white; }
+
+        .block-focus-overlay {
+            position: absolute;
+            background: rgba(59, 130, 246, 0.1);
+            border: 2px dashed #3b82f6;
+            pointer-events: none;
+            border-radius: 4px;
+            z-index: 5;
+            transition: all 0.3s;
+        }
+
+        .code-highlight { background-color: rgba(59, 130, 246, 0.2); border-left: 4px solid #3b82f6; }
+        .code-container { max-height: 450px; overflow-y: auto; }
+        
+        @keyframes pulse-compute {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.15); color: #2563eb; }
+            100% { transform: scale(1); }
+        }
+        .anim-compute { animation: pulse-compute 0.4s ease; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-6 font-sans">
+
+    <div class="max-w-7xl mx-auto space-y-6">
+        <!-- Header -->
+        <header class="flex flex-wrap justify-between items-end gap-4 border-b pb-4">
+            <div>
+                <h1 class="text-3xl font-bold text-slate-800">SGEMM: Shared Memory Tiling Visualizer</h1>
+                <p class="text-slate-600 mt-1">Watch threads cooperatively load data to fast On-Chip SRAM before computing.</p>
+            </div>
+            <div class="flex gap-4 items-center">
+                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 flex gap-6">
+                    <div class="text-right">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">Global DRAM Reads</div>
+                        <div id="metricGlobal" class="text-xl font-mono font-bold text-red-500">0</div>
+                    </div>
+                    <div class="text-right border-l pl-6">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">Shared SRAM Reads</div>
+                        <div id="metricShared" class="text-xl font-mono font-bold text-green-500">0</div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <!-- Left Column: Controls & Code -->
+            <div class="lg:col-span-4 flex flex-col gap-4">
+                <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="font-bold text-slate-700 uppercase text-xs tracking-wider">Simulation Engine</h2>
+                        <div id="phaseIndicator" class="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-widest">Init Block</div>
+                    </div>
+                    
+                    <div class="flex items-center gap-2 mb-4">
+                        <button id="playBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition-colors">
+                            <span id="playIcon">▶ Play</span>
+                        </button>
+                        <button id="stepBackBtn" class="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-3 rounded-lg font-bold text-sm border shadow-sm transition-colors">⟲ Back</button>
+                        <button id="stepBtn" class="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-3 rounded-lg font-bold text-sm border shadow-sm transition-colors">Step Fwd</button>
+                    </div>
+
+                    <div class="space-y-4">
+                        <div>
+                            <div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-1">
+                                <span>Speed</span><span id="speedVal">600ms</span>
+                            </div>
+                            <input type="range" id="speedSlider" min="100" max="1500" value="600" class="w-full accent-blue-600">
+                        </div>
+                        <div class="bg-slate-50 rounded-lg p-3 border text-xs text-slate-600 flex justify-between items-center cursor-pointer hover:bg-slate-100 transition-colors" onclick="nextBlock()">
+                            <span class="font-bold text-slate-700">Current Focus:</span>
+                            <span id="blockFocusLabel" class="bg-white px-2 py-1 border rounded font-mono shadow-sm">Block (0, 0)</span>
+                            <span class="text-[10px] text-blue-500 underline">Skip to Next Block &rarr;</span>
+                        </div>
+                        <button id="resetBtn" class="w-full text-center text-xs text-slate-400 hover:text-slate-600 underline font-medium">Restart Simulation</button>
+                    </div>
+                </div>
+
+                <!-- Code View -->
+                <div class="bg-slate-900 text-slate-300 p-4 rounded-xl shadow-lg font-mono text-[10px] code-container border border-slate-700 flex-grow">
+                    <div class="text-slate-500 italic mb-2">// BlockDim=(2,2), TILE_SIZE=2</div>
+                    <div id="line-alloc" class="rounded px-1 transition duration-200 text-yellow-300">__shared__ float tileA[2][2];<br>__shared__ float tileB[2][2 + 1]; <span class="text-slate-500">// +1 Bank Padding</span></div>
+                    <div class="h-2"></div>
+                    <div id="line-global" class="rounded px-1 transition duration-200">int globalRow = blockIdx.y * 2 + threadIdx.y;<br>int globalCol = blockIdx.x * 2 + threadIdx.x;</div>
+                    <div class="h-2"></div>
+                    <div id="line-loop-tile" class="rounded px-1 transition duration-200">for (int tileIdx = 0; tileIdx < K / 2; tileIdx++) {</div>
+                    
+                    <div id="line-load" class="rounded px-1 ml-4 transition duration-200 text-green-300">
+                        tileA[ty][tx] = A[globalRow * K + (tileIdx*2 + tx)];<br>
+                        tileB[ty][tx] = B[(tileIdx*2 + ty) * N + globalCol];
+                    </div>
+                    
+                    <div id="line-sync1" class="rounded px-1 ml-4 transition duration-200 text-red-400 font-bold">__syncthreads(); // Barrier</div>
+                    <div class="h-1"></div>
+                    <div id="line-loop-k" class="rounded px-1 ml-4 transition duration-200">for (int k = 0; k < 2; k++) {</div>
+                    <div id="line-compute" class="rounded px-1 ml-8 transition duration-200 text-purple-300">partialSum += tileA[ty][k] * tileB[k][tx];</div>
+                    <div class="rounded px-1 ml-4">}</div>
+                    <div class="h-1"></div>
+                    <div id="line-sync2" class="rounded px-1 ml-4 transition duration-200 text-red-400 font-bold">__syncthreads(); // Barrier</div>
+                    <div class="rounded px-1">}</div>
+                    <div class="h-2"></div>
+                    <div id="line-store" class="rounded px-1 transition duration-200 text-blue-400">C[globalRow*N + globalCol] = partialSum;</div>
+                </div>
+            </div>
+
+            <!-- Middle Column: Architecture View -->
+            <div class="lg:col-span-8 flex flex-col gap-6">
+                
+                <!-- Main Graphics Panel -->
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 relative">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        
+                        <!-- Global Memory Section -->
+                        <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 relative">
+                            <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 border rounded-full shadow-sm">Global Memory (DRAM)</h3>
+                            
+                            <div class="flex flex-col items-center mt-2 space-y-6">
+                                <div class="flex flex-col items-center">
+                                    <span class="text-[10px] font-bold text-red-600 mb-1">Matrix A (4 × 8)</span>
+                                    <div class="relative">
+                                        <div id="gridA" class="matrix-grid"></div>
+                                        <div id="focusA" class="block-focus-overlay"></div>
+                                    </div>
+                                </div>
+                                <div class="flex flex-col items-center">
+                                    <span class="text-[10px] font-bold text-green-600 mb-1">Matrix B (8 × 4)</span>
+                                    <div class="relative">
+                                        <div id="gridB" class="matrix-grid"></div>
+                                        <div id="focusB" class="block-focus-overlay"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- On-Chip Section -->
+                        <div class="flex flex-col gap-6">
+                            
+                            <!-- Shared Memory -->
+                            <div class="bg-amber-50 p-4 rounded-xl border border-amber-200 relative shadow-inner">
+                                <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-600 border border-amber-200 rounded-full shadow-sm">Shared Memory (SRAM)</h3>
+                                
+                                <div class="flex justify-around items-center mt-4">
+                                    <div class="flex flex-col items-center">
+                                        <span class="text-[10px] font-bold text-amber-700 mb-1">tileA [2][2]</span>
+                                        <div id="gridSA" class="matrix-grid"></div>
+                                    </div>
+                                    <div class="flex flex-col items-center">
+                                        <span class="text-[10px] font-bold text-purple-700 mb-1">tileB [2][3] (Padded)</span>
+                                        <div id="gridSB" class="matrix-grid"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Compute / Registers -->
+                            <div class="bg-blue-50 p-4 rounded-xl border border-blue-200 relative flex-grow flex flex-col justify-center">
+                                <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-blue-600 border border-blue-200 rounded-full shadow-sm">Registers & Matrix C</h3>
+                                
+                                <div class="flex flex-col items-center mt-2">
+                                    <span class="text-[10px] font-bold text-blue-800 mb-1">Matrix C (4 × 4)</span>
+                                    <div class="relative">
+                                        <div id="gridC" class="matrix-grid"></div>
+                                        <div id="focusC" class="block-focus-overlay"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Execution Monitor -->
+                <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                    <div class="bg-slate-800 text-white px-4 py-2 flex justify-between items-center">
+                        <h3 class="text-sm font-bold">Block Thread Monitor (BlockDim = 2×2)</h3>
+                        <span class="text-[10px] bg-slate-600 px-2 py-0.5 rounded uppercase font-bold text-slate-200">Current Phase Details</span>
+                    </div>
+                    <div class="p-0 overflow-x-auto">
+                        <table class="w-full text-left text-[11px]">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-bold">
+                                    <th class="px-4 py-2">Thread (tx,ty)</th>
+                                    <th class="px-4 py-2">Global Target</th>
+                                    <th class="px-4 py-2" id="monitorActionHeader">Action</th>
+                                    <th class="px-4 py-2">Local partialSum</th>
+                                </tr>
+                            </thead>
+                            <tbody id="monitorBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Explanation Box -->
+                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                    <h4 class="text-xs font-bold text-slate-800 uppercase mb-3 tracking-tight border-b pb-2">Why Tiling Works (The Math)</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-[12px] text-slate-700">
+                        <div>
+                            <p class="mb-2"><strong>Without Shared Memory:</strong> Each thread reads an entire row of A and column of B from slow global DRAM.</p>
+                            <div class="bg-red-50 text-red-800 p-2 rounded border border-red-100 font-mono text-center">
+                                \(\text{DRAM Reads} = 2 \times M \times N \times K\)
+                            </div>
+                        </div>
+                        <div>
+                            <p class="mb-2"><strong>With Shared Memory:</strong> Threads cooperatively load a tile into fast SRAM, then reuse it \(\text{TILE_SIZE}\) times.</p>
+                            <div class="bg-green-50 text-green-800 p-2 rounded border border-green-100 font-mono text-center">
+                                \(\text{DRAM Reads} = \frac{2 \times M \times N \times K}{\text{TILE_SIZE}}\)
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-4 bg-slate-50 p-4 rounded text-[11px] text-slate-700 border border-slate-200">
+                        <p class="font-bold text-slate-900 mb-2">Why exactly \(2 \times M \times N \times K\) for the naive approach?</p>
+                        <ol class="list-decimal pl-5 space-y-1 mb-2">
+                            <li><strong>Total Number of Threads (\(M \times N\)):</strong> We launch one thread for every single element in the output Matrix C (which has \(M\) rows and \(N\) columns).</li>
+                            <li><strong>What Each Thread Does (\(K\) steps):</strong> To compute its single target value, a thread calculates the dot product of one row from Matrix A and one column from Matrix B. Both have a length of \(K\).</li>
+                            <li><strong>Memory Reads per Thread (\(2 \times K\)):</strong> In every iteration of that \(K\)-length loop, the thread reads one value from A and one from B (2 reads).</li>
+                            <li><strong>The Final Math:</strong> Total Threads &times; Reads per Thread = \((M \times N) \times (2 \times K) = 2 \times M \times N \times K\).</li>
+                        </ol>
+                        <p class="text-slate-600"><strong>Why Tiling Fixes This:</strong> Neighboring threads need the <em>same</em> rows of A or columns of B. The naive approach fetches the exact same data from slow DRAM repeatedly. Tiling brings a chunk of that data into fast shared memory once, then threads read from the shared memory, drastically cutting down that massive number!</p>
+                    </div>
+
+                    <div class="mt-4 bg-slate-50 p-3 rounded text-[11px] text-slate-600 border">
+                        <strong>Bank Conflicts & Padding:</strong> Notice <code>tileB</code> is sized <code>[2][3]</code> instead of <code>[2][2]</code>. Shared memory is divided into 32 banks. By adding a +1 padding column, we shift the memory addresses so that threads reading down a column of <code>tileB</code> don't hit the same hardware bank simultaneously, avoiding costly serialization.
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // System Parameters
+        const M = 4, K = 8, N = 4;
+        const TILE_SIZE = 2;
+        const BLOCKS_X = N / TILE_SIZE; // 2
+        const BLOCKS_Y = M / TILE_SIZE; // 2
+        
+        let metrics = { global: 0, shared: 0 };
+        let historyStack = [];
+        
+        // Simulation State
+        let state = {
+            blockX: 0, blockY: 0,
+            tileIdx: 0, k: 0,
+            phase: 'init', // init -> load -> sync1 -> compute -> sync2 -> store
+            isPlaying: false, speed: 600,
+            partialSums: [0, 0, 0, 0] // For the 4 threads in the current block
+        };
+
+        // Data Storage
+        const DATA = {
+            A: Array.from({length: M}, () => Array.from({length: K}, () => Math.floor(Math.random() * 10))),
+            B: Array.from({length: K}, () => Array.from({length: N}, () => Math.floor(Math.random() * 10))),
+            C: Array.from({length: M}, () => Array.from({length: N}, () => 0)),
+            tileA: [[0,0],[0,0]],
+            tileB: [[0,0,0],[0,0,0]] // padded
+        };
+
+        // Initialize DOM Elements
+        function initGrids() {
+            const createGrid = (id, rows, cols, type, padCol = -1) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.innerHTML = '';
+                el.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+                
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        const cell = document.createElement('div');
+                        if (c === padCol) {
+                            cell.className = `cell cell-pad w-5 h-5 md:w-6 md:h-6`;
+                            cell.title = "Padding to prevent bank conflicts";
+                        } else {
+                            cell.className = `cell cell-${type} w-5 h-5 md:w-6 md:h-6`;
+                            cell.id = `${type}-${r}-${c}`;
+                            // Init values
+                            if (type === 'a') cell.textContent = DATA.A[r][c];
+                            else if (type === 'b') cell.textContent = DATA.B[r][c];
+                            else if (type === 'c') cell.textContent = DATA.C[r][c];
+                            else cell.textContent = '0';
+                        }
+                        el.appendChild(cell);
+                    }
+                }
+            };
+
+            createGrid('gridA', M, K, 'a');
+            createGrid('gridB', K, N, 'b');
+            createGrid('gridC', M, N, 'c');
+            createGrid('gridSA', TILE_SIZE, TILE_SIZE, 'sa');
+            createGrid('gridSB', TILE_SIZE, TILE_SIZE + 1, 'sb', 2); // col 2 is pad
+            
+            updateOverlays();
+        }
+
+        function updateOverlays() {
+            const placeOverlay = (focusId, gridId, startR, startC, rows, cols) => {
+                const overlay = document.getElementById(focusId);
+                const grid = document.getElementById(gridId);
+                const firstCell = document.getElementById(`${gridId.replace('grid','').toLowerCase()}-${startR}-${startC}`);
+                const lastCell = document.getElementById(`${gridId.replace('grid','').toLowerCase()}-${startR + rows - 1}-${startC + cols - 1}`);
+                
+                if (overlay && grid && firstCell && lastCell) {
+                    const gridRect = grid.getBoundingClientRect();
+                    const firstRect = firstCell.getBoundingClientRect();
+                    const lastRect = lastCell.getBoundingClientRect();
+                    
+                    overlay.style.top = `${firstRect.top - gridRect.top - 4}px`;
+                    overlay.style.left = `${firstRect.left - gridRect.left - 4}px`;
+                    overlay.style.width = `${lastRect.right - firstRect.left + 8}px`;
+                    overlay.style.height = `${lastRect.bottom - firstRect.top + 8}px`;
+                }
+            };
+
+            if (state.phase === 'done') {
+                const fa = document.getElementById('focusA');
+                const fb = document.getElementById('focusB');
+                const fc = document.getElementById('focusC');
+                if(fa) fa.style.opacity = 0;
+                if(fb) fb.style.opacity = 0;
+                if(fc) fc.style.opacity = 0;
+                const bfl = document.getElementById('blockFocusLabel');
+                if(bfl) bfl.textContent = `Completed`;
+                return;
+            }
+
+            // Overlay C is static per block
+            placeOverlay('focusC', 'gridC', state.blockY * TILE_SIZE, state.blockX * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            const fc = document.getElementById('focusC');
+            if(fc) fc.style.opacity = 1;
+            
+            // Overlays A and B move with tileIdx
+            if (state.phase !== 'init' && state.phase !== 'store') {
+                const fa = document.getElementById('focusA');
+                const fb = document.getElementById('focusB');
+                if(fa) fa.style.opacity = 1;
+                if(fb) fb.style.opacity = 1;
+                placeOverlay('focusA', 'gridA', state.blockY * TILE_SIZE, state.tileIdx * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                placeOverlay('focusB', 'gridB', state.tileIdx * TILE_SIZE, state.blockX * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            } else {
+                const fa = document.getElementById('focusA');
+                const fb = document.getElementById('focusB');
+                if(fa) fa.style.opacity = 0;
+                if(fb) fb.style.opacity = 0;
+            }
+            
+            const bfl = document.getElementById('blockFocusLabel');
+            if(bfl) bfl.textContent = `Block (${state.blockX}, ${state.blockY})`;
+        }
+
+        function highlightCode(id) {
+            document.querySelectorAll('[id^="line-"]').forEach(el => el.classList.remove('code-highlight'));
+            if (id) document.getElementById(id)?.classList.add('code-highlight');
+        }
+
+        function updateUI() {
+            // Clean all cell highlights
+            document.querySelectorAll('.cell').forEach(c => {
+                c.classList.remove('active-global-read', 'active-shared-write', 'active-shared-read', 'active-global-write', 'anim-compute');
+            });
+            
+            updateOverlays();
+
+            const pInd = document.getElementById('phaseIndicator');
+            const tbody = document.getElementById('monitorBody');
+            let actionHeader = "Action";
+
+            if (state.phase === 'init') {
+                highlightCode('line-global');
+                if(pInd) {
+                    pInd.textContent = "Block Initialization";
+                    pInd.className = "px-2 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+            } else if (state.phase === 'load') {
+                highlightCode('line-load');
+                if(pInd) {
+                    pInd.textContent = `Load Tile ${state.tileIdx} to Shared`;
+                    pInd.className = "px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+                actionHeader = "Global \u2192 Shared Transfer";
+            } else if (state.phase === 'sync1') {
+                highlightCode('line-sync1');
+                if(pInd) {
+                    pInd.textContent = "Barrier (Wait for Load)";
+                    pInd.className = "px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+            } else if (state.phase === 'compute') {
+                highlightCode('line-compute');
+                if(pInd) {
+                    pInd.textContent = `Compute (k=${state.k})`;
+                    pInd.className = "px-2 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+                actionHeader = "Shared \u2192 Register Math";
+            } else if (state.phase === 'sync2') {
+                highlightCode('line-sync2');
+                if(pInd) {
+                    pInd.textContent = "Barrier (Wait for Compute)";
+                    pInd.className = "px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+            } else if (state.phase === 'store') {
+                highlightCode('line-store');
+                if(pInd) {
+                    pInd.textContent = "Store to Global Memory";
+                    pInd.className = "px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+                actionHeader = "Register \u2192 Global Write";
+            } else if (state.phase === 'done') {
+                if(pInd) {
+                    pInd.textContent = "Simulation Complete";
+                    pInd.className = "px-2 py-0.5 rounded bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-widest";
+                }
+                actionHeader = "Finished";
+            }
+
+            const headerEl = document.getElementById('monitorActionHeader');
+            if(headerEl) headerEl.textContent = actionHeader;
+            
+            if(tbody) tbody.innerHTML = '';
+
+            // Generate Monitor Rows & Apply Cell Highlights
+            for (let ty = 0; ty < TILE_SIZE; ty++) {
+                for (let tx = 0; tx < TILE_SIZE; tx++) {
+                    const tid = ty * 2 + tx;
+                    const gRow = state.blockY * TILE_SIZE + ty;
+                    const gCol = state.blockX * TILE_SIZE + tx;
+                    const aCol = state.tileIdx * TILE_SIZE + tx;
+                    const bRow = state.tileIdx * TILE_SIZE + ty;
+                    
+                    const row = document.createElement('tr');
+                    row.className = "border-b border-slate-100";
+                    let actionHtml = "-";
+
+                    if (state.phase === 'load') {
+                        document.getElementById(`a-${gRow}-${aCol}`)?.classList.add('active-global-read');
+                        document.getElementById(`b-${bRow}-${gCol}`)?.classList.add('active-global-read');
+                        
+                        const saCell = document.getElementById(`sa-${ty}-${tx}`);
+                        const sbCell = document.getElementById(`sb-${ty}-${tx}`);
+                        
+                        saCell?.classList.add('active-shared-write');
+                        sbCell?.classList.add('active-shared-write');
+                        
+                        const safeValA = (gRow < M && aCol < K && DATA.A[gRow]) ? DATA.A[gRow][aCol] : 0;
+                        const safeValB = (bRow < K && gCol < N && DATA.B[bRow]) ? DATA.B[bRow][gCol] : 0;
+                        
+                        if(saCell) saCell.textContent = safeValA;
+                        if(sbCell) sbCell.textContent = safeValB;
+
+                        actionHtml = `Read A[${gRow}][${aCol}], B[${bRow}][${gCol}]`;
+                    } 
+                    else if (state.phase === 'compute') {
+                        document.getElementById(`sa-${ty}-${state.k}`)?.classList.add('active-shared-read');
+                        document.getElementById(`sb-${state.k}-${tx}`)?.classList.add('active-shared-read');
+                        
+                        const vA = DATA.tileA[ty][state.k];
+                        const vB = DATA.tileB[state.k][tx];
+                        actionHtml = `<span class="text-purple-600 font-bold">${vA} &times; ${vB} = ${vA*vB}</span>`;
+                        row.classList.add('bg-purple-50');
+                    }
+                    else if (state.phase === 'store') {
+                        const cCell = document.getElementById(`c-${gRow}-${gCol}`);
+                        if(cCell) {
+                            cCell.classList.add('active-global-write');
+                            cCell.textContent = state.partialSums[tid];
+                        }
+                        actionHtml = `<span class="text-blue-600 font-bold">Write C[${gRow}][${gCol}]</span>`;
+                    }
+
+                    if (tbody) {
+                        row.innerHTML = `
+                            <th class="px-4 py-2 text-slate-500 italic font-mono text-[10px]">T(${tx},${ty})</th>
+                            <td class="px-4 py-2 font-mono">C(${gRow},${gCol})</td>
+                            <td class="px-4 py-2">${actionHtml}</td>
+                            <td class="px-4 py-2 font-bold text-slate-700 ${state.phase === 'compute' ? 'anim-compute' : ''}">${state.partialSums[tid]}</td>
+                        `;
+                        tbody.appendChild(row);
+                    }
+                }
+            }
+
+            // Update Control UI element states safely
+            const uiPlayBtn = document.getElementById('playBtn');
+            const uiStepBtn = document.getElementById('stepBtn');
+            const uiStepBackBtn = document.getElementById('stepBackBtn');
+
+            if (state.phase === 'done') {
+                if (uiPlayBtn) { uiPlayBtn.disabled = true; uiPlayBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                if (uiStepBtn) { uiStepBtn.disabled = true; uiStepBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+            } else {
+                if (uiPlayBtn) { uiPlayBtn.disabled = false; uiPlayBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (uiStepBtn) { uiStepBtn.disabled = false; uiStepBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            }
+
+            if (historyStack.length === 0) {
+                if (uiStepBackBtn) { uiStepBackBtn.disabled = true; uiStepBackBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+            } else {
+                if (uiStepBackBtn) { uiStepBackBtn.disabled = false; uiStepBackBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            }
+
+            // Update Metrics
+            const mg = document.getElementById('metricGlobal');
+            const ms = document.getElementById('metricShared');
+            if(mg) mg.textContent = metrics.global;
+            if(ms) ms.textContent = metrics.shared;
+        }
+
+        function saveState() {
+            historyStack.push({
+                state: JSON.parse(JSON.stringify(state)),
+                metrics: JSON.parse(JSON.stringify(metrics)),
+                tileA: JSON.parse(JSON.stringify(DATA.tileA)),
+                tileB: JSON.parse(JSON.stringify(DATA.tileB)),
+                C: JSON.parse(JSON.stringify(DATA.C))
+            });
+        }
+
+        function stepBack() {
+            if (historyStack.length === 0) return;
+            
+            if (state.isPlaying) togglePlay();
+
+            const prev = historyStack.pop();
+            state = prev.state;
+            metrics = prev.metrics;
+            DATA.tileA = prev.tileA;
+            DATA.tileB = prev.tileB;
+            DATA.C = prev.C;
+
+            // Restore Grid C display
+            for (let r = 0; r < M; r++) {
+                for (let c = 0; c < N; c++) {
+                    const cell = document.getElementById(`c-${r}-${c}`);
+                    if (cell) cell.textContent = DATA.C[r][c];
+                }
+            }
+            
+            // Restore Shared Memory display
+            for(let r=0; r<TILE_SIZE; r++) {
+                for(let c=0; c<TILE_SIZE; c++) {
+                    const sa = document.getElementById(`sa-${r}-${c}`);
+                    if (sa) sa.textContent = DATA.tileA[r][c];
+                }
+                for(let c=0; c<TILE_SIZE+1; c++) {
+                    const sb = document.getElementById(`sb-${r}-${c}`);
+                    if (sb) sb.textContent = DATA.tileB[r][c] || '0';
+                }
+            }
+
+            updateUI();
+        }
+
+        function step() {
+            saveState();
+            if (state.phase === 'init') {
+                state.phase = 'load';
+            } 
+            else if (state.phase === 'load') {
+                // Populate physical tile data with safety bounds
+                for (let ty = 0; ty < TILE_SIZE; ty++) {
+                    for (let tx = 0; tx < TILE_SIZE; tx++) {
+                        const gRow = state.blockY * TILE_SIZE + ty;
+                        const gCol = state.blockX * TILE_SIZE + tx;
+                        const aCol = state.tileIdx * TILE_SIZE + tx;
+                        const bRow = state.tileIdx * TILE_SIZE + ty;
+                        
+                        DATA.tileA[ty][tx] = (gRow < M && aCol < K && DATA.A[gRow]) ? DATA.A[gRow][aCol] : 0;
+                        DATA.tileB[ty][tx] = (bRow < K && gCol < N && DATA.B[bRow]) ? DATA.B[bRow][gCol] : 0;
+                    }
+                }
+                metrics.global += 8; // 4 threads * 2 loads
+                state.phase = 'sync1';
+            } 
+            else if (state.phase === 'sync1') {
+                state.phase = 'compute';
+                state.k = 0;
+            } 
+            else if (state.phase === 'compute') {
+                for (let ty = 0; ty < TILE_SIZE; ty++) {
+                    for (let tx = 0; tx < TILE_SIZE; tx++) {
+                        const tid = ty * 2 + tx;
+                        state.partialSums[tid] += DATA.tileA[ty][state.k] * DATA.tileB[state.k][tx];
+                    }
+                }
+                metrics.shared += 8; // 4 threads * 2 reads from shared memory
+                
+                state.k++;
+                if (state.k >= TILE_SIZE) {
+                    state.phase = 'sync2';
+                }
+            } 
+            else if (state.phase === 'sync2') {
+                state.tileIdx++;
+                if (state.tileIdx >= K / TILE_SIZE) {
+                    state.phase = 'store';
+                } else {
+                    state.phase = 'load';
+                }
+            } 
+            else if (state.phase === 'store') {
+                for (let ty = 0; ty < TILE_SIZE; ty++) {
+                    for (let tx = 0; tx < TILE_SIZE; tx++) {
+                        const gRow = state.blockY * TILE_SIZE + ty;
+                        const gCol = state.blockX * TILE_SIZE + tx;
+                        const tid = ty * 2 + tx;
+                        if (gRow < M && gCol < N && DATA.C[gRow]) {
+                            DATA.C[gRow][gCol] = state.partialSums[tid];
+                        }
+                    }
+                }
+                metrics.global += 4; // 4 global writes
+                
+                // Halt at the end of the block computation to let user review
+                if(state.isPlaying) togglePlay(); 
+                
+                // Advance the block pointers automatically for the next go-around
+                state.blockX++;
+                if (state.blockX >= BLOCKS_X) {
+                    state.blockX = 0;
+                    state.blockY++;
+                    if (state.blockY >= BLOCKS_Y) {
+                        state.phase = 'done';
+                        
+                        // Clear the visual shared memory blocks
+                        for(let r=0; r<TILE_SIZE; r++) {
+                            for(let c=0; c<TILE_SIZE; c++) {
+                                const sa = document.getElementById(`sa-${r}-${c}`);
+                                const sb = document.getElementById(`sb-${r}-${c}`);
+                                if(sa) sa.textContent = '0';
+                                if(sb) sb.textContent = '0';
+                            }
+                        }
+                        updateUI();
+                        return; // End simulation
+                    }
+                }
+                state.tileIdx = 0;
+                state.k = 0;
+                state.phase = 'init';
+                state.partialSums = [0, 0, 0, 0];
+                
+                // Clear the visual shared memory blocks
+                for(let r=0; r<TILE_SIZE; r++) {
+                    for(let c=0; c<TILE_SIZE; c++) {
+                        const sa = document.getElementById(`sa-${r}-${c}`);
+                        const sb = document.getElementById(`sb-${r}-${c}`);
+                        if(sa) sa.textContent = '0';
+                        if(sb) sb.textContent = '0';
+                    }
+                }
+                
+                updateUI();
+                return; // Early return to prevent double updateUI
+            }
+            updateUI();
+        }
+
+        function nextBlock() {
+            if (state.phase === 'done') return;
+            saveState();
+            state.blockX++;
+            if (state.blockX >= BLOCKS_X) {
+                state.blockX = 0;
+                state.blockY++;
+                if (state.blockY >= BLOCKS_Y) {
+                    state.phase = 'done';
+                    if (state.isPlaying) togglePlay();
+                    
+                    // Clear shared memory display
+                    for(let r=0; r<TILE_SIZE; r++) {
+                        for(let c=0; c<TILE_SIZE; c++) {
+                            const sa = document.getElementById(`sa-${r}-${c}`);
+                            const sb = document.getElementById(`sb-${r}-${c}`);
+                            if(sa) sa.textContent = '0';
+                            if(sb) sb.textContent = '0';
+                        }
+                    }
+                    updateUI();
+                    return;
+                }
+            }
+            state.tileIdx = 0;
+            state.k = 0;
+            state.phase = 'init';
+            state.partialSums = [0, 0, 0, 0];
+            
+            // Clear shared memory display
+            for(let r=0; r<TILE_SIZE; r++) {
+                for(let c=0; c<TILE_SIZE; c++) {
+                    const sa = document.getElementById(`sa-${r}-${c}`);
+                    const sb = document.getElementById(`sb-${r}-${c}`);
+                    if(sa) sa.textContent = '0';
+                    if(sb) sb.textContent = '0';
+                }
+            }
+            
+            updateUI();
+        }
+
+        function resetSim() {
+            state = {
+                blockX: 0, blockY: 0, tileIdx: 0, k: 0,
+                isPlaying: false, speed: document.getElementById('speedSlider')?.value || 600, 
+                warpMode: true, phase: 'init', partialSums: [0, 0, 0, 0]
+            };
+            metrics = { global: 0, shared: 0 };
+            historyStack = [];
+            const playIcon = document.getElementById('playIcon');
+            if(playIcon) playIcon.textContent = '▶ Play';
+            if(timer) clearInterval(timer);
+            
+            // Reset C
+            DATA.C = Array.from({length: M}, () => Array.from({length: N}, () => 0));
+            initGrids();
+            updateUI();
+        }
+
+        let timer;
+        function togglePlay() {
+            state.isPlaying = !state.isPlaying;
+            const playIcon = document.getElementById('playIcon');
+            if(playIcon) playIcon.textContent = state.isPlaying ? '⏸ Pause' : '▶ Play';
+            if (state.isPlaying) timer = setInterval(step, state.speed);
+            else clearInterval(timer);
+        }
+
+        // Setup DOM Listeners globally
+        const globalPlayBtn = document.getElementById('playBtn');
+        if(globalPlayBtn) globalPlayBtn.onclick = togglePlay;
+        
+        const globalStepBtn = document.getElementById('stepBtn');
+        if(globalStepBtn) globalStepBtn.onclick = step;
+
+        const globalStepBackBtn = document.getElementById('stepBackBtn');
+        if(globalStepBackBtn) globalStepBackBtn.onclick = stepBack;
+        
+        const globalResetBtn = document.getElementById('resetBtn');
+        if(globalResetBtn) globalResetBtn.onclick = resetSim;
+        
+        const globalSpeedSlider = document.getElementById('speedSlider');
+        if(globalSpeedSlider) {
+            globalSpeedSlider.oninput = (e) => {
+                state.speed = e.target.value;
+                const speedVal = document.getElementById('speedVal');
+                if(speedVal) speedVal.textContent = `${state.speed}ms`;
+                if (state.isPlaying) { clearInterval(timer); timer = setInterval(step, state.speed); }
+            };
+        }
+
+        // Bootstrap
+        window.addEventListener('DOMContentLoaded', () => {
+            initGrids();
+            // Give DOM a tiny bit to render grids before calculating overlay positions
+            setTimeout(updateUI, 50);
+            
+            // Redraw overlays on resize
+            window.addEventListener('resize', updateUI);
+        });
+    </script>
+</body>
+</html>

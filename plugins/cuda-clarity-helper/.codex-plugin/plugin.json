@@ -1,0 +1,41 @@
+{
+  "name": "cuda-clarity-helper",
+  "version": "0.1.0",
+  "description": "Repo-local helper for improving CUDA file readability, comments, and top-of-file algorithm summaries in cuda-algorithm-lab.",
+  "author": {
+    "name": "Arash Saifhashemi",
+    "url": "https://github.com/ourarash"
+  },
+  "homepage": "https://github.com/ourarash/cuda-algorithm-lab",
+  "repository": "https://github.com/ourarash/cuda-algorithm-lab",
+  "license": "MIT",
+  "keywords": [
+    "cuda",
+    "comments",
+    "readability",
+    "documentation",
+    "education",
+    "kernels"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CUDA Clarity Helper",
+    "shortDescription": "Improve comments, readability, and top-of-file algorithm explanations",
+    "longDescription": "Helps rewrite CUDA files so they are easier to read, adds intent-focused comments where needed, and ensures each file starts with a clear explanation of the file's purpose and the high-level algorithm.",
+    "developerName": "Arash Saifhashemi",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "privacyPolicyURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "termsOfServiceURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "defaultPrompt": [
+      "Use $cuda-clarity-helper to make this CUDA file easier to read.",
+      "Use $cuda-clarity-helper to add a top-of-file intent and high-level algorithm summary.",
+      "Use $cuda-clarity-helper to improve comments without adding noise."
+    ],
+    "brandColor": "#F59E0B"
+  }
+}

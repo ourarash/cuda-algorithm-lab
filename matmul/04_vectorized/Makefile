@@ -3,10 +3,10 @@ CFLAGS = -O3
 
 .PHONY: all clean
 
-all: 04_matmul_vectorized
+all: 05_matmul_vectorized
 
-04_matmul_vectorized: 04_matmul_vectorized.cu
+05_matmul_vectorized: 05_matmul_vectorized.cu
 	$(NVCC) $(CFLAGS) -o $@ $<
 
 clean:
-	rm -f 04_matmul_vectorized
+	rm -f 05_matmul_vectorized

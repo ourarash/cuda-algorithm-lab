@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: Linearized Coalesced Mapping
+ *
+ * Intention:
+ * This version shows that the same coalesced computation can be expressed with
+ * a linear thread index rather than a 2D thread layout.
+ *
+ * High-Level Algorithm:
+ * - Flatten the local thread id.
+ * - Derive the output row and column from that single id.
+ * - Preserve the coalesced access pattern from the 2D coalesced version.
+ * - Compute one output value per thread.
+ */
 #include <cassert>
 #include <cmath>
 #include <cuda_runtime.h>
@@ -16,22 +29,24 @@
 
 #define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
 
-// Threads in warp change
+constexpr int kBlockSize = 32;
+
+// This kernel computes the same coalesced mapping as the 2D version, but it
+// derives row/column coordinates from a flattened local thread id.
 __global__ void sgemm_naive_coalesced_linear(int M, int N, int K, float alpha,
                                              const float *A, const float *B,
                                              float beta, float *C) {
+  // Flatten the 2D thread coordinates into one local id in the 32x32 tile.
+  const int linear_thread_id = threadIdx.y * blockDim.x + threadIdx.x;
 
-  // const uint j = blockIdx.x * blockDim.x + threadIdx.x;
-  // const uint i = blockIdx.y * blockDim.y + threadIdx.y;
-  // This is equivalent to the following, but with a single index
-  const int i = blockIdx.x * BLOCK_SIZE + (threadIdx.x / BLOCK_SIZE);
-  const int j = blockIdx.y * BLOCK_SIZE + (threadIdx.x % BLOCK_SIZE);
+  // Recover the output row/column from the flattened local id.
+  const int i = blockIdx.y * kBlockSize + (linear_thread_id / kBlockSize);
+  const int j = blockIdx.x * kBlockSize + (linear_thread_id % kBlockSize);
 
   // compute position in C that this thread is responsible for
-  // Note that j is changing with threadIdx.x and i with threadIdx.y
-  // This means j is changing faster than i
+  // Note that j changes faster than i inside the flattened thread order.
   // so access of
-  // - A[i, k] is broadcased (since i, k are constant in the warp)
+  // - A[i, k] is broadcast (since i, k are constant in the warp)
   // - B[k, j] is coalesced (since k, j are constant in the warp)
   // - C[i, j] is coalesced
 
@@ -69,7 +84,6 @@ int main() {
             << "\n";
 
   const int M = 1024, N = 1024, K = 1024;
-  const int BLOCK_SIZE = 32; // Block size for the kernel
   float alpha = 1.0f, beta = 0.0f;
 
   std::vector<float> A(M * K), B(K * N), C_cpu(M * N), C_gpu(M * N);
@@ -107,14 +121,14 @@ int main() {
                    cudaMemcpyHostToDevice));
 
   // create as many blocks as necessary to map all of C
-  dim3 gridDim(CEIL_DIV(M, BLOCK_SIZE), CEIL_DIV(N, BLOCK_SIZE), 1);
+  dim3 gridDim(CEIL_DIV(N, kBlockSize), CEIL_DIV(M, kBlockSize), 1);
 
-  // BLOCK_SIZE * BLOCK_SIZE threads per block
-  dim3 blockDim(BLOCK_SIZE, BLOCK_SIZE, 1);
+  // kBlockSize * kBlockSize threads cooperate on one 32x32 output tile.
+  dim3 blockDim(kBlockSize, kBlockSize, 1);
   // launch the asynchronous execution of the kernel on the device
   // The function call returns immediately on the host
-  sgemm_naive_coalesced<<<gridDim, blockDim>>>(M, N, K, alpha, dA, dB, beta,
-                                               dC);
+  sgemm_naive_coalesced_linear<<<gridDim, blockDim>>>(M, N, K, alpha, dA, dB,
+                                                      beta, dC);
   CHECK(cudaGetLastError()); // Check for kernel launch errors
   CHECK(cudaDeviceSynchronize());
 

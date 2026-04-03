@@ -1,3 +1,16 @@
+/*
+ * Siboehm GEMM: 2D Register Tiling With Padding
+ *
+ * Intention:
+ * This is the most optimized kernel in the Siboehm series here: combine 2D
+ * register tiling with shared-memory padding to reduce bank conflicts.
+ *
+ * High-Level Algorithm:
+ * - Use shared-memory tiling for block-level data reuse.
+ * - Use padding in the B tile to reduce shared-memory bank conflicts.
+ * - Let each thread accumulate a TM x TN output tile in registers.
+ * - Write the register tile back after all K tiles have been processed.
+ */
 #include <cassert>
 #include <cmath>
 #include <cstdlib>

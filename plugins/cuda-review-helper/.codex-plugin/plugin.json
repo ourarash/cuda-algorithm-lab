@@ -1,0 +1,41 @@
+{
+  "name": "cuda-review-helper",
+  "version": "0.1.0",
+  "description": "Repo-local CUDA review helper for kernels, algorithm progressions, and interactive visualizations in cuda-algorithm-lab.",
+  "author": {
+    "name": "Arash Saifhashemi",
+    "url": "https://github.com/ourarash"
+  },
+  "homepage": "https://github.com/ourarash/cuda-algorithm-lab",
+  "repository": "https://github.com/ourarash/cuda-algorithm-lab",
+  "license": "MIT",
+  "keywords": [
+    "cuda",
+    "review",
+    "kernels",
+    "performance",
+    "visualization",
+    "education"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CUDA Review Helper",
+    "shortDescription": "Review CUDA kernels and visualizers for correctness and teaching quality",
+    "longDescription": "Helps review CUDA examples, algorithm progression files, Makefiles, and interactive visualizations in this repository with a focus on correctness, readability, educational flow, and consistency across the repo.",
+    "developerName": "Arash Saifhashemi",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "privacyPolicyURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "termsOfServiceURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "defaultPrompt": [
+      "Use $cuda-review-helper to review a CUDA kernel for correctness and readability.",
+      "Use $cuda-review-helper to review a visualization page for teaching quality and consistency with the corresponding CUDA file.",
+      "Use $cuda-review-helper to check whether a folder progression is coherent and submission-ready."
+    ],
+    "brandColor": "#0EA5E9"
+  }
+}

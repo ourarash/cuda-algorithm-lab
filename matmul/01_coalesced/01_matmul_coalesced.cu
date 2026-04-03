@@ -1,3 +1,17 @@
+/*
+ * Coalesced Matrix Multiplication
+ *
+ * Intention:
+ * This file fixes the main flaw in the uncoalesced version by changing the
+ * thread mapping so neighboring threads access neighboring columns.
+ *
+ * High-Level Algorithm:
+ * - Launch a 2D thread block.
+ * - Let each thread compute one output element C[i, j].
+ * - Map threadIdx.x to columns so loads from B and stores to C become
+ *   coalesced across the warp.
+ * - Keep everything else simple so the effect of thread mapping is isolated.
+ */
 #include <cassert>
 #include <cmath>
 #include <cuda_runtime.h>

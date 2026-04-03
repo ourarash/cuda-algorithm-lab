@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA SGEMM: 1D Register Tiling Visualizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <style>
+        .matrix-grid { display: grid; gap: 2px; }
+        .cell {
+            aspect-ratio: 1/1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: 600;
+            border-radius: 2px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        
+        /* Global Memory Cells */
+        .cell-a { background-color: #fee2e2; border: 1px solid #fecaca; color: #7f1d1d; }
+        .cell-b { background-color: #dcfce7; border: 1px solid #bbf7d0; color: #14532d; }
+        .cell-c { background-color: #dbeafe; border: 1px solid #bfdbfe; color: #1e3a8a; }
+        
+        /* Shared Memory Cells */
+        .cell-sa { background-color: #ffedd5; border: 1px solid #fde047; color: #713f12; }
+        .cell-sb { background-color: #f3e8ff; border: 1px solid #d8b4fe; color: #4c1d95; }
+
+        /* Register Cell */
+        .cell-reg { background-color: #fce7f3; border: 1px solid #f9a8d4; color: #831843; border-radius: 4px; font-weight: bold; }
+
+        /* 1D Strip Highlights (TM=4) */
+        .strip-cell-0 { 
+            border-top: 2px solid #2563eb !important; 
+            border-left: 2px solid #2563eb !important; 
+            border-right: 2px solid #2563eb !important; 
+            border-bottom: 1px dotted #93c5fd !important; 
+            background-color: #eff6ff !important; 
+            z-index: 6; 
+            border-top-left-radius: 4px; 
+            border-top-right-radius: 4px;
+        }
+        .strip-cell-1, .strip-cell-2 { 
+            border-bottom: 1px dotted #93c5fd !important; 
+            border-left: 2px solid #2563eb !important; 
+            border-right: 2px solid #2563eb !important; 
+            border-top: none !important; 
+            background-color: #eff6ff !important; 
+            z-index: 6; 
+        }
+        .strip-cell-3 { 
+            border-bottom: 2px solid #2563eb !important; 
+            border-left: 2px solid #2563eb !important; 
+            border-right: 2px solid #2563eb !important; 
+            border-top: none !important; 
+            background-color: #eff6ff !important; 
+            z-index: 6; 
+            border-bottom-left-radius: 4px; 
+            border-bottom-right-radius: 4px;
+        }
+
+        /* Active Actions Highlights */
+        .active-global-read { transform: scale(1.1); box-shadow: 0 0 10px rgba(0,0,0,0.2); z-index: 10; filter: brightness(0.9); }
+        .active-shared-write { transform: scale(1.1); box-shadow: 0 0 10px rgba(234, 179, 8, 0.5); z-index: 10; border-color: #eab308; }
+        .active-shared-read { transform: scale(1.1); box-shadow: 0 0 10px rgba(168, 85, 247, 0.5); z-index: 10; border-color: #a855f7; }
+        .active-global-write { transform: scale(1.1); box-shadow: 0 0 10px rgba(59, 130, 246, 0.5); z-index: 10; background-color: #3b82f6 !important; color: white !important; }
+        .active-reg-read { transform: scale(1.1); box-shadow: 0 0 10px rgba(236, 72, 153, 0.5); z-index: 10; border: 2px solid #ec4899 !important; }
+        .active-compute-target { transform: scale(1.15); box-shadow: 0 0 10px rgba(168, 85, 247, 0.5); z-index: 11; background-color: #f3e8ff !important; border: 2px solid #a855f7 !important; color: #6b21a8 !important; }
+
+        /* Hardware Broadcast Pulsing Effect */
+        @keyframes ripple-broadcast {
+            0% { box-shadow: 0 0 0 0 rgba(236, 72, 153, 0.8); transform: scale(1.15); }
+            50% { box-shadow: 0 0 0 8px rgba(236, 72, 153, 0); transform: scale(1.2); }
+            100% { box-shadow: 0 0 0 0 rgba(236, 72, 153, 0); transform: scale(1.15); }
+        }
+        .active-broadcast-read { 
+            z-index: 15; 
+            background-color: #fce7f3 !important; 
+            border: 2px solid #ec4899 !important; 
+            color: #831843 !important; 
+            animation: ripple-broadcast 1.2s infinite; 
+        }
+
+        .block-focus-overlay {
+            position: absolute;
+            background: rgba(59, 130, 246, 0.1);
+            border: 2px dashed #3b82f6;
+            pointer-events: none;
+            border-radius: 4px;
+            z-index: 5;
+            transition: all 0.3s;
+        }
+
+        .code-highlight { background-color: rgba(59, 130, 246, 0.2); border-left: 4px solid #3b82f6; }
+        .code-container { max-height: 480px; overflow-y: auto; }
+        
+        @keyframes pulse-compute {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.15); font-weight: 900; }
+            100% { transform: scale(1); }
+        }
+        .anim-compute { animation: pulse-compute 0.4s ease; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-6 font-sans">
+
+    <div class="max-w-7xl mx-auto space-y-6">
+        <!-- Header -->
+        <header class="flex flex-wrap justify-between items-end gap-4 border-b pb-4">
+            <div>
+                <h1 class="text-3xl font-bold text-slate-800">SGEMM: 1D Register Tiling Visualizer</h1>
+                <p class="text-slate-600 mt-1">Increasing Arithmetic Intensity: Threads load into <strong>Registers</strong> to reuse data and slash Shared Memory access.</p>
+            </div>
+            <div class="flex gap-4 items-center">
+                <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 flex gap-6">
+                    <div class="text-right">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">Global Reads</div>
+                        <div id="metricGlobal" class="text-xl font-mono font-bold text-red-500">0</div>
+                    </div>
+                    <div class="text-right border-l pl-6">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">Shared Reads</div>
+                        <div id="metricShared" class="text-xl font-mono font-bold text-green-500">0</div>
+                    </div>
+                    <div class="text-right border-l pl-6">
+                        <div class="text-[10px] uppercase font-bold text-slate-400">Register Reads</div>
+                        <div id="metricReg" class="text-xl font-mono font-bold text-purple-600">0</div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <!-- Left Column: Controls & Code -->
+            <div class="lg:col-span-4 flex flex-col gap-4">
+                <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="font-bold text-slate-700 uppercase text-xs tracking-wider">Simulation Engine</h2>
+                        <div id="phaseIndicator" class="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-widest">Init Block</div>
+                    </div>
+                    
+                    <div class="flex items-center gap-2 mb-4">
+                        <button id="playBtn" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2 transition-colors">
+                            <span id="playIcon">▶ Play</span>
+                        </button>
+                        <button id="stepBackBtn" class="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-3 rounded-lg font-bold text-sm border shadow-sm transition-colors">⟲</button>
+                        <button id="stepBtn" class="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 px-3 rounded-lg font-bold text-sm border shadow-sm transition-colors">Step</button>
+                    </div>
+
+                    <div class="space-y-4">
+                        <div>
+                            <div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-1">
+                                <span>Animation Speed</span><span id="speedVal">600ms</span>
+                            </div>
+                            <input type="range" id="speedSlider" min="100" max="1500" value="600" class="w-full accent-blue-600">
+                        </div>
+                        <div class="bg-slate-50 rounded-lg p-3 border text-xs text-slate-600 flex justify-between items-center">
+                            <span class="font-bold text-slate-700">Current Focus:</span>
+                            <span id="blockFocusLabel" class="bg-white px-2 py-1 border rounded font-mono shadow-sm">Block (0, 0)</span>
+                        </div>
+                        <button id="resetBtn" class="w-full text-center text-xs text-slate-400 hover:text-slate-600 underline font-medium">Restart Simulation</button>
+                    </div>
+                </div>
+
+                <!-- Code View -->
+                <div class="bg-slate-900 text-slate-300 p-4 rounded-xl shadow-lg font-mono text-[10px] code-container border border-slate-700 flex-grow">
+                    <div class="text-slate-500 italic mb-2">// 1D Tiling: BM=8, BN=4, BK=4, TM=4<br>// 8 Threads per block compute an 8x4 C-Tile.</div>
+                    <div id="line-alloc" class="rounded px-1 transition duration-200 text-yellow-300">
+                        __shared__ float As[8][4];<br>
+                        __shared__ float Bs[4][4];
+                    </div>
+                    <div class="h-2"></div>
+                    <div id="line-init" class="rounded px-1 transition duration-200">
+                        const int ty = threadIdx.y; // 0 to 1<br>
+                        const int tx = threadIdx.x; // 0 to 3<br>
+                        float threadResults[4] = {0.0f};
+                    </div>
+                    <div class="h-2"></div>
+                    <div id="line-loop-tile" class="rounded px-1 transition duration-200">for (int bkIdx = 0; bkIdx < K; bkIdx += 4) {</div>
+                    
+                    <div id="line-load" class="rounded px-1 ml-4 transition duration-200 text-green-300">
+                        // Cooperative load to Shared Memory<br>
+                        As[...] = A[...];<br>
+                        Bs[...] = B[...];
+                    </div>
+                    
+                    <div id="line-sync1" class="rounded px-1 ml-4 transition duration-200 text-red-400 font-bold">__syncthreads();</div>
+                    <div class="h-1"></div>
+                    <div id="line-loop-k" class="rounded px-1 ml-4 transition duration-200">for (int dotIdx = 0; dotIdx < 4; ++dotIdx) {</div>
+                    
+                    <div id="line-load-b" class="rounded px-1 ml-8 transition duration-200 text-pink-400 font-bold">
+                        // Load 1 element from Shared to Register<br>
+                        // Hardware Broadcasts to identical `tx` threads<br>
+                        float Btmp = Bs[dotIdx][tx];
+                    </div>
+                    
+                    <div id="line-loop-m" class="rounded px-1 ml-8 transition duration-200 mt-1">
+                        #pragma unroll<br>
+                        for (int resIdx = 0; resIdx < 4; ++resIdx) {
+                    </div>
+                    <div id="line-compute" class="rounded px-1 ml-12 transition duration-200 text-purple-300 font-bold">
+                        // Reuse Btmp 4 times! Math Intensity Up!<br>
+                        threadResults[resIdx] += As[ty * 4 + resIdx][dotIdx] * Btmp;
+                    </div>
+                    <div class="rounded px-1 ml-8">}</div>
+                    <div class="rounded px-1 ml-4">}</div>
+                    <div class="h-1"></div>
+                    <div id="line-sync2" class="rounded px-1 ml-4 transition duration-200 text-red-400 font-bold">__syncthreads();</div>
+                    <div class="rounded px-1">}</div>
+                    <div class="h-2"></div>
+                    <div id="line-store" class="rounded px-1 transition duration-200 text-blue-400">
+                        // Write accumulated results from registers back to global memory C<br>
+                        #pragma unroll<br>
+                        for (int resIdx = 0; resIdx < 4; ++resIdx) {<br>
+                        &nbsp;&nbsp;C[... + resIdx*N + tx] = threadResults[resIdx];<br>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Middle Column: Architecture View -->
+            <div class="lg:col-span-8 flex flex-col gap-6">
+                
+                <!-- Main Graphics Panel -->
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 relative">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        
+                        <!-- Global Memory Section -->
+                        <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 relative">
+                            <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-slate-500 border rounded-full shadow-sm">Global Memory (DRAM)</h3>
+                            
+                            <div class="flex flex-col items-center mt-2 space-y-4">
+                                <div class="flex flex-col items-center">
+                                    <span class="text-[10px] font-bold text-red-600 mb-1">Matrix A (8 × 8)</span>
+                                    <div class="relative">
+                                        <div id="gridA" class="matrix-grid"></div>
+                                        <div id="focusA" class="block-focus-overlay"></div>
+                                    </div>
+                                </div>
+                                <div class="flex flex-col items-center">
+                                    <span class="text-[10px] font-bold text-green-600 mb-1">Matrix B (8 × 8)</span>
+                                    <div class="relative">
+                                        <div id="gridB" class="matrix-grid"></div>
+                                        <div id="focusB" class="block-focus-overlay"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- On-Chip Section -->
+                        <div class="flex flex-col gap-6">
+                            
+                            <!-- Shared Memory -->
+                            <div class="bg-amber-50 p-4 rounded-xl border border-amber-200 relative shadow-inner">
+                                <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-600 border border-amber-200 rounded-full shadow-sm">Shared Memory (SRAM)</h3>
+                                
+                                <div class="flex justify-around items-center mt-4">
+                                    <div class="flex flex-col items-center">
+                                        <span class="text-[10px] font-bold text-amber-700 mb-1">As [8][4]</span>
+                                        <div id="gridSA" class="matrix-grid"></div>
+                                    </div>
+                                    <div class="flex flex-col items-center">
+                                        <span class="text-[10px] font-bold text-purple-700 mb-1">Bs [4][4]</span>
+                                        <div id="gridSB" class="matrix-grid"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Compute / Registers -->
+                            <div class="bg-blue-50 p-4 rounded-xl border border-blue-200 relative flex-grow flex flex-col justify-center">
+                                <h3 class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-blue-600 border border-blue-200 rounded-full shadow-sm">Global Matrix C</h3>
+                                
+                                <div class="flex flex-col items-center mt-2">
+                                    <span class="text-[10px] font-bold text-blue-800 mb-1">Matrix C (8 × 8)</span>
+                                    <div class="text-[10px] text-slate-500 mb-2 font-medium">Each thread computes a 4×1 vertical strip</div>
+                                    <div class="relative">
+                                        <div id="gridC" class="matrix-grid"></div>
+                                        <div id="focusC" class="block-focus-overlay"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Execution Monitor -->
+                <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                    <div class="bg-slate-800 text-white px-4 py-2 flex justify-between items-center">
+                        <h3 class="text-sm font-bold">Thread Monitor (8 Threads | TM=4)</h3>
+                        <span class="text-[10px] bg-slate-600 px-2 py-0.5 rounded uppercase font-bold text-slate-200">Registers & Math</span>
+                    </div>
+                    <div class="p-0 overflow-x-auto">
+                        <table class="w-full text-left text-[10px]">
+                            <thead>
+                                <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-bold">
+                                    <th class="px-2 py-2">TID</th>
+                                    <th class="px-2 py-2">Action</th>
+                                    <th class="px-2 py-2 text-pink-600">Btmp</th>
+                                    <th class="px-2 py-2 text-purple-700">Res[0]</th>
+                                    <th class="px-2 py-2 text-purple-700">Res[1]</th>
+                                    <th class="px-2 py-2 text-purple-700">Res[2]</th>
+                                    <th class="px-2 py-2 text-purple-700">Res[3]</th>
+                                </tr>
+                            </thead>
+                            <tbody id="monitorBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Explanation Box -->
+                <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                    <h4 class="text-xs font-bold text-slate-800 uppercase mb-3 tracking-tight border-b pb-2">Why 1D Register Tiling (Work-Per-Thread)?</h4>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-[12px] text-slate-700">
+                        <div>
+                            <p class="mb-2"><strong>Is this 1D Tiling?</strong> Yes! Each thread computes a 1D column vector (in our viz, a \(4 \times 1\) tile) of the output block.</p>
+                            <p><strong>The Core Idea:</strong> We load a single value from Matrix B in shared memory into a fast, private hardware <strong>Register</strong> (<code>Btmp</code>).</p>
+                        </div>
+                        <div>
+                            <p class="mb-2"><strong>Increasing Arithmetic Intensity:</strong> Because the thread calculates multiple rows (TM), it can reuse <code>Btmp</code> to multiply against multiple elements from Matrix A.</p>
+                            <div class="bg-purple-50 text-purple-800 p-2 rounded border border-purple-100 font-mono text-center">
+                                \(\text{SRAM Reads for B} \div \text{TM}\)
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-4 bg-slate-50 p-4 rounded text-[11px] text-slate-700 border border-slate-200">
+                        <p class="font-bold text-slate-900 mb-2">The Impact on the "Memory Wall":</p>
+                        <p class="mb-2">Standard Shared Memory tiling fixes the <strong>Global Memory</strong> bottleneck, but replaces it with a <strong>Shared Memory</strong> bottleneck (Shared Memory is fast, but Registers are vastly faster).</p>
+                        <ul class="list-disc pl-5 space-y-1 text-slate-600">
+                            <li>Without Register Tiling (TM=1): 1 Shared Read of A + 1 Shared Read of B = 1 FMA instruction. (Ratio 2:1)</li>
+                            <li><strong>With Register Tiling (TM=4):</strong> We read <code>Btmp</code> once. Then we read 4 values from A to perform 4 FMA instructions. That's 5 Shared Reads for 4 FMAs. (Ratio 1.25:1)</li>
+                            <li><strong>With TM=8:</strong> 9 Shared Reads for 8 FMAs. (Ratio ~1.1:1). The GPU is no longer starved for memory and can calculate at maximum theoretical speed!</li>
+                        </ul>
+                    </div>
+
+                    <div class="mt-4 bg-slate-50 p-4 rounded text-[11px] text-slate-700 border border-slate-200">
+                        <p class="font-bold text-slate-900 mb-2">Why is the Shared Tile for A (8&times;4) larger than B (4&times;4)?</p>
+                        <p class="mb-2">It directly relates to the work each thread is doing! Our block has 8 threads arranged in a 2&times;4 grid. Since each thread computes a <strong>4&times;1 vertical strip</strong> (TM = 4), the block collectively computes an <strong>8&times;4 block</strong> of the output Matrix C.</p>
+                        <p>To compute an 8&times;4 block of C, the threads need 8 rows from Matrix A but only 4 columns from Matrix B. Thus, the tile fetched from A (<code>As</code>) must be twice as tall as the tile fetched from B (<code>Bs</code>).</p>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Scaled Up System Parameters (TM=4)
+        const M = 8, K = 8, N = 8;
+        const BM = 8, BN = 4, BK = 4;
+        const TM = 4; // Each thread computes 4 elements
+        const THREADS_X = BN; // 4
+        const THREADS_Y = BM / TM; // 2
+        const BLOCKS_X = N / BN; // 2
+        const BLOCKS_Y = M / BM; // 1
+        
+        let metrics = { global: 0, shared: 0, reg: 0 };
+        let historyStack = [];
+        
+        // Simulation State
+        let state = {
+            blockX: 0, blockY: 0,
+            tileIdx: 0, k: 0, m: 0,
+            phase: 'init',
+            isPlaying: false, 
+            speed: 600,
+            regs: Array(THREADS_X * THREADS_Y).fill().map(() => [0, 0, 0, 0]),
+            Btmp: Array(THREADS_X * THREADS_Y).fill(0)
+        };
+
+        // Data Storage
+        const DATA = {
+            A: Array.from({length: M}, () => Array.from({length: K}, () => Math.floor(Math.random() * 10))),
+            B: Array.from({length: K}, () => Array.from({length: N}, () => Math.floor(Math.random() * 10))),
+            C: Array.from({length: M}, () => Array.from({length: N}, () => 0)),
+            As: Array.from({length: BM}, () => Array.from({length: BK}, () => 0)),
+            Bs: Array.from({length: BK}, () => Array.from({length: BN}, () => 0))
+        };
+
+        // Initialize DOM Elements
+        function initGrids() {
+            const createGrid = (id, rows, cols, type) => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.innerHTML = '';
+                el.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+                
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        const cell = document.createElement('div');
+                        cell.className = `cell cell-${type} w-4 h-4 md:w-5 md:h-5 lg:w-6 lg:h-6`;
+                        cell.id = `${type}-${r}-${c}`;
+                        // Init values
+                        if (type === 'a') cell.textContent = DATA.A[r][c];
+                        else if (type === 'b') cell.textContent = DATA.B[r][c];
+                        else if (type === 'c') cell.textContent = DATA.C[r][c];
+                        else cell.textContent = '0';
+                        el.appendChild(cell);
+                    }
+                }
+            };
+
+            createGrid('gridA', M, K, 'a');
+            createGrid('gridB', K, N, 'b');
+            createGrid('gridC', M, N, 'c');
+            createGrid('gridSA', BM, BK, 'sa');
+            createGrid('gridSB', BK, BN, 'sb'); 
+            
+            updateOverlays();
+        }
+
+        function updateOverlays() {
+            const placeOverlay = (focusId, gridId, startR, startC, rows, cols) => {
+                const overlay = document.getElementById(focusId);
+                const grid = document.getElementById(gridId);
+                const firstCell = document.getElementById(`${gridId.replace('grid','').toLowerCase()}-${startR}-${startC}`);
+                const lastCell = document.getElementById(`${gridId.replace('grid','').toLowerCase()}-${startR + rows - 1}-${startC + cols - 1}`);
+                
+                if (overlay && grid && firstCell && lastCell) {
+                    const gridRect = grid.getBoundingClientRect();
+                    const firstRect = firstCell.getBoundingClientRect();
+                    const lastRect = lastCell.getBoundingClientRect();
+                    
+                    overlay.style.top = `${firstRect.top - gridRect.top - 4}px`;
+                    overlay.style.left = `${firstRect.left - gridRect.left - 4}px`;
+                    overlay.style.width = `${lastRect.right - firstRect.left + 8}px`;
+                    overlay.style.height = `${lastRect.bottom - firstRect.top + 8}px`;
+                }
+            };
+
+            if (state.phase === 'done') {
+                ['focusA', 'focusB', 'focusC'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if(el) el.style.opacity = 0;
+                });
+                const bfl = document.getElementById('blockFocusLabel');
+                if(bfl) bfl.textContent = `Simulation Complete`;
+                return;
+            }
+
+            placeOverlay('focusC', 'gridC', state.blockY * BM, state.blockX * BN, BM, BN); 
+            document.getElementById('focusC').style.opacity = 1;
+            
+            if (state.phase !== 'init' && state.phase !== 'store') {
+                document.getElementById('focusA').style.opacity = 1;
+                document.getElementById('focusB').style.opacity = 1;
+                placeOverlay('focusA', 'gridA', state.blockY * BM, state.tileIdx * BK, BM, BK);
+                placeOverlay('focusB', 'gridB', state.tileIdx * BK, state.blockX * BN, BK, BN);
+            } else {
+                document.getElementById('focusA').style.opacity = 0;
+                document.getElementById('focusB').style.opacity = 0;
+            }
+
+            const bfl = document.getElementById('blockFocusLabel');
+            if(bfl) bfl.textContent = `Block (${state.blockX}, ${state.blockY})`;
+        }
+
+        function highlightCode(id) {
+            document.querySelectorAll('[id^="line-"]').forEach(el => el.classList.remove('code-highlight'));
+            if (id) document.getElementById(id)?.classList.add('code-highlight');
+        }
+
+        function updateUI() {
+            document.querySelectorAll('.cell').forEach(c => {
+                c.classList.remove('active-global-read', 'active-shared-write', 'active-shared-read', 'active-global-write', 'anim-compute', 'strip-cell-0', 'strip-cell-1', 'strip-cell-2', 'strip-cell-3', 'active-reg-read', 'active-compute-target', 'active-broadcast-read');
+                c.style.color = '';
+            });
+            
+            updateOverlays();
+
+            const pInd = document.getElementById('phaseIndicator');
+            const tbody = document.getElementById('monitorBody');
+
+            if (state.phase === 'init') {
+                highlightCode('line-init');
+                if(pInd) { pInd.textContent = "Thread Initialization"; pInd.className = "px-2 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] font-bold uppercase tracking-widest"; }
+            } else if (state.phase === 'load') {
+                highlightCode('line-load');
+                if(pInd) { pInd.textContent = `Cooperative Load (Tile ${state.tileIdx})`; pInd.className = "px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-widest"; }
+            } else if (state.phase === 'sync1') {
+                highlightCode('line-sync1');
+                if(pInd) { pInd.textContent = "Barrier (__syncthreads)"; pInd.className = "px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-widest"; }
+            } else if (state.phase === 'load_b') {
+                highlightCode('line-load-b');
+                if(pInd) { pInd.textContent = `Hardware Broadcast B \u2192 Regs (k=${state.k})`; pInd.className = "px-2 py-0.5 rounded bg-pink-200 text-pink-800 text-[10px] font-bold uppercase tracking-widest shadow-sm"; }
+            } else if (state.phase === 'compute_fma') {
+                highlightCode('line-compute');
+                if(pInd) { pInd.textContent = `FMA (k=${state.k}, res=${state.m})`; pInd.className = "px-2 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] font-bold uppercase tracking-widest"; }
+            } else if (state.phase === 'sync2') {
+                highlightCode('line-sync2');
+                if(pInd) { pInd.textContent = "Barrier (__syncthreads)"; pInd.className = "px-2 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-widest"; }
+            } else if (state.phase === 'store') {
+                highlightCode('line-store');
+                if(pInd) { pInd.textContent = "Store Registers to Global"; pInd.className = "px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-widest"; }
+            } else if (state.phase === 'done') {
+                if(pInd) { pInd.textContent = "Grid Computation Complete"; pInd.className = "px-2 py-0.5 rounded bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-widest"; }
+            }
+
+            if(tbody) tbody.innerHTML = '';
+
+            for (let tid = 0; tid < 8; tid++) {
+                const ty = Math.floor(tid / THREADS_X); // 0..1
+                const tx = tid % THREADS_X; // 0..3
+                
+                const row = document.createElement('tr');
+                row.className = "border-b border-slate-100";
+                let actionHtml = "-";
+
+                if (['load_b', 'compute_fma', 'sync2', 'store'].includes(state.phase)) {
+                    for (let i = 0; i < TM; i++) {
+                        const gRowC = state.blockY * BM + ty * TM + i;
+                        const gColC = state.blockX * BN + tx;
+                        const cCell = document.getElementById(`c-${gRowC}-${gColC}`);
+                        if (cCell) {
+                            cCell.classList.add(`strip-cell-${i}`);
+                            if (state.phase === 'compute_fma' && i === state.m) {
+                                cCell.classList.add('anim-compute', 'active-compute-target');
+                                cCell.style.color = '#7e22ce'; 
+                            }
+                        }
+                    }
+                }
+
+                if (state.phase === 'load') {
+                    for(let r=0; r<BM; r++) {
+                        for(let c=0; c<BK; c++) {
+                            const gRowA = state.blockY * BM + r;
+                            const gColA = state.tileIdx * BK + c;
+                            document.getElementById(`a-${gRowA}-${gColA}`)?.classList.add('active-global-read');
+                            document.getElementById(`sa-${r}-${c}`)?.classList.add('active-shared-write');
+                        }
+                    }
+                    for(let r=0; r<BK; r++) {
+                        for(let c=0; c<BN; c++) {
+                            const gRowB = state.tileIdx * BK + r;
+                            const gColB = state.blockX * BN + c;
+                            document.getElementById(`b-${gRowB}-${gColB}`)?.classList.add('active-global-read');
+                            document.getElementById(`sb-${r}-${c}`)?.classList.add('active-shared-write');
+                        }
+                    }
+                    actionHtml = `<span class="text-xs">Coop Load Tile</span>`;
+                } 
+                else if (state.phase === 'load_b') {
+                    document.getElementById(`sb-${state.k}-${tx}`)?.classList.add('active-broadcast-read');
+                    const bVal = DATA.Bs[state.k][tx];
+                    actionHtml = `Btmp = <strong class="text-pink-600">${bVal}</strong> <span class="text-[8px] bg-pink-200 text-pink-800 px-1 rounded font-bold uppercase ml-1 shadow-sm tracking-tighter" title="Hardware Broadcast: 1 read serves multiple threads">Broadcast</span>`;
+                    row.classList.add('bg-pink-50');
+                }
+                else if (state.phase === 'compute_fma') {
+                    const rowAs = ty * TM + state.m;
+                    document.getElementById(`sa-${rowAs}-${state.k}`)?.classList.add('active-shared-read');
+                    document.getElementById(`sb-${state.k}-${tx}`)?.classList.add('active-reg-read');
+                    
+                    const aVal = DATA.As[rowAs][state.k];
+                    const bVal = state.Btmp[tid];
+                    actionHtml = `<span class="text-purple-600 tracking-tighter">Reg[${state.m}]+=${aVal}&times;${bVal}</span>`;
+                    row.classList.add('bg-purple-50');
+                }
+                else if (state.phase === 'store') {
+                    for (let i=0; i<TM; i++) {
+                        const gRowC = state.blockY * BM + ty * TM + i;
+                        const gColC = state.blockX * BN + tx;
+                        const cCell = document.getElementById(`c-${gRowC}-${gColC}`);
+                        if(cCell) {
+                            cCell.classList.add('active-global-write');
+                            cCell.textContent = state.regs[tid][i];
+                        }
+                    }
+                    actionHtml = `<span class="text-blue-600 font-bold tracking-tighter">Regs &rarr; Global C</span>`;
+                    row.classList.add('bg-blue-50');
+                }
+
+                const btmpVal = state.phase === 'init' || (state.phase === 'load' && state.tileIdx===0) ? "-" : state.Btmp[tid];
+                
+                if (tbody) {
+                    row.innerHTML = `
+                        <th class="px-2 py-2 text-slate-500 italic font-mono text-[9px]">T(${tx},${ty})</th>
+                        <td class="px-2 py-2">${actionHtml}</td>
+                        <td class="px-2 py-2 font-bold ${state.phase === 'load_b' ? 'anim-compute text-pink-600' : 'text-slate-700'}">${btmpVal}</td>
+                        <td class="px-2 py-2 font-bold ${state.phase === 'compute_fma' && state.m === 0 ? 'anim-compute text-purple-700' : (state.phase === 'store' ? 'text-blue-700' : 'text-slate-700')}">${state.regs[tid][0]}</td>
+                        <td class="px-2 py-2 font-bold ${state.phase === 'compute_fma' && state.m === 1 ? 'anim-compute text-purple-700' : (state.phase === 'store' ? 'text-blue-700' : 'text-slate-700')}">${state.regs[tid][1]}</td>
+                        <td class="px-2 py-2 font-bold ${state.phase === 'compute_fma' && state.m === 2 ? 'anim-compute text-purple-700' : (state.phase === 'store' ? 'text-blue-700' : 'text-slate-700')}">${state.regs[tid][2]}</td>
+                        <td class="px-2 py-2 font-bold ${state.phase === 'compute_fma' && state.m === 3 ? 'anim-compute text-purple-700' : (state.phase === 'store' ? 'text-blue-700' : 'text-slate-700')}">${state.regs[tid][3]}</td>
+                    `;
+                    tbody.appendChild(row);
+                }
+            }
+
+            if (state.phase === 'load') {
+                 for(let r=0; r<BM; r++) {
+                    for(let c=0; c<BK; c++) {
+                        const sa = document.getElementById(`sa-${r}-${c}`);
+                        if(sa) sa.textContent = DATA.As[r][c];
+                    }
+                }
+                for(let r=0; r<BK; r++) {
+                    for(let c=0; c<BN; c++) {
+                        const sb = document.getElementById(`sb-${r}-${c}`);
+                        if(sb) sb.textContent = DATA.Bs[r][c];
+                    }
+                }
+            }
+
+            const uiPlayBtn = document.getElementById('playBtn');
+            const uiStepBtn = document.getElementById('stepBtn');
+            const uiStepBackBtn = document.getElementById('stepBackBtn');
+
+            if (state.phase === 'done') {
+                if (uiPlayBtn) { uiPlayBtn.disabled = true; uiPlayBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                if (uiStepBtn) { uiStepBtn.disabled = true; uiStepBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+            } else {
+                if (uiPlayBtn) { uiPlayBtn.disabled = false; uiPlayBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (uiStepBtn) { uiStepBtn.disabled = false; uiStepBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            }
+
+            if (historyStack.length === 0) {
+                if (uiStepBackBtn) { uiStepBackBtn.disabled = true; uiStepBackBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+            } else {
+                if (uiStepBackBtn) { uiStepBackBtn.disabled = false; uiStepBackBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            }
+
+            document.getElementById('metricGlobal').textContent = metrics.global;
+            document.getElementById('metricShared').textContent = metrics.shared;
+            document.getElementById('metricReg').textContent = metrics.reg;
+        }
+
+        function saveState() {
+            historyStack.push({
+                state: JSON.parse(JSON.stringify(state)),
+                metrics: JSON.parse(JSON.stringify(metrics)),
+                As: JSON.parse(JSON.stringify(DATA.As)),
+                Bs: JSON.parse(JSON.stringify(DATA.Bs)),
+                C: JSON.parse(JSON.stringify(DATA.C))
+            });
+        }
+
+        function stepBack() {
+            if (historyStack.length === 0) return;
+            if (state.isPlaying) togglePlay();
+
+            const prev = historyStack.pop();
+            state = prev.state;
+            metrics = prev.metrics;
+            DATA.As = prev.As;
+            DATA.Bs = prev.Bs;
+            DATA.C = prev.C;
+
+            for (let r = 0; r < M; r++) {
+                for (let c = 0; c < N; c++) {
+                    const cell = document.getElementById(`c-${r}-${c}`);
+                    if (cell) cell.textContent = DATA.C[r][c];
+                }
+            }
+            for(let r=0; r<BM; r++) {
+                for(let c=0; c<BK; c++) {
+                    const sa = document.getElementById(`sa-${r}-${c}`);
+                    if (sa) sa.textContent = DATA.As[r][c];
+                }
+            }
+            for(let r=0; r<BK; r++) {
+                for(let c=0; c<BN; c++) {
+                    const sb = document.getElementById(`sb-${r}-${c}`);
+                    if (sb) sb.textContent = DATA.Bs[r][c];
+                }
+            }
+
+            updateUI();
+        }
+
+        function step() {
+            saveState();
+            
+            if (state.phase === 'init') {
+                state.phase = 'load';
+            } 
+            else if (state.phase === 'load') {
+                for(let r=0; r<BM; r++) {
+                    for(let c=0; c<BK; c++) {
+                        const gRowA = state.blockY * BM + r;
+                        const gColA = state.tileIdx * BK + c;
+                        DATA.As[r][c] = (gRowA < M && gColA < K) ? DATA.A[gRowA][gColA] : 0; 
+                    }
+                }
+                for(let r=0; r<BK; r++) {
+                    for(let c=0; c<BN; c++) {
+                        const gRowB = state.tileIdx * BK + r;
+                        const gColB = state.blockX * BN + c;
+                        DATA.Bs[r][c] = (gRowB < K && gColB < N) ? DATA.B[gRowB][gColB] : 0;
+                    }
+                }
+                metrics.global += (BM*BK + BK*BN); // 48 loads
+                state.phase = 'sync1';
+            } 
+            else if (state.phase === 'sync1') {
+                state.k = 0;
+                state.phase = 'load_b';
+            }
+            else if (state.phase === 'load_b') {
+                for (let tid = 0; tid < 8; tid++) {
+                    const tx = tid % THREADS_X;
+                    state.Btmp[tid] = DATA.Bs[state.k][tx];
+                }
+                metrics.shared += 8; 
+                metrics.reg += 8;   
+                state.m = 0;
+                state.phase = 'compute_fma';
+            }
+            else if (state.phase === 'compute_fma') {
+                for (let tid = 0; tid < 8; tid++) {
+                    const ty = Math.floor(tid / THREADS_X);
+                    const rowAs = ty * TM + state.m;
+                    const aVal = DATA.As[rowAs][state.k];
+                    state.regs[tid][state.m] += aVal * state.Btmp[tid];
+                }
+                metrics.shared += 8; 
+                metrics.reg += 16;  
+                
+                state.m++;
+                if (state.m >= TM) {
+                    state.k++;
+                    if (state.k >= BK) {
+                        state.phase = 'sync2';
+                    } else {
+                        state.phase = 'load_b';
+                    }
+                }
+            } 
+            else if (state.phase === 'sync2') {
+                state.tileIdx++;
+                if (state.tileIdx >= K / BK) {
+                    state.phase = 'store';
+                } else {
+                    state.phase = 'load';
+                }
+            } 
+            else if (state.phase === 'store') {
+                for (let tid = 0; tid < 8; tid++) {
+                    const ty = Math.floor(tid / THREADS_X);
+                    const tx = tid % THREADS_X;
+                    for (let i = 0; i < TM; i++) {
+                        const gRow = state.blockY * BM + ty * TM + i;
+                        const gCol = state.blockX * BN + tx;
+                        if (gRow < M && gCol < N && DATA.C[gRow]) {
+                            DATA.C[gRow][gCol] = state.regs[tid][i];
+                        }
+                    }
+                }
+                metrics.global += (BM*BN); // 32 writes
+                
+                state.blockX++;
+                if (state.blockX >= BLOCKS_X) {
+                    state.blockX = 0;
+                    state.blockY++;
+                    if (state.blockY >= BLOCKS_Y) {
+                        state.phase = 'done';
+                        if(state.isPlaying) togglePlay(); 
+                        for(let r=0; r<BM; r++) {
+                            for(let c=0; c<BK; c++) {
+                                const sa = document.getElementById(`sa-${r}-${c}`);
+                                if(sa) sa.textContent = '0';
+                            }
+                        }
+                        for(let r=0; r<BK; r++) {
+                            for(let c=0; c<BN; c++) {
+                                const sb = document.getElementById(`sb-${r}-${c}`);
+                                if(sb) sb.textContent = '0';
+                            }
+                        }
+                        updateUI();
+                        return;
+                    }
+                }
+                
+                state.tileIdx = 0;
+                state.k = 0;
+                state.phase = 'init';
+                state.regs = Array(THREADS_X * THREADS_Y).fill().map(() => [0, 0, 0, 0]);
+                state.Btmp = Array(THREADS_X * THREADS_Y).fill(0);
+                
+                for(let r=0; r<BM; r++) {
+                    for(let c=0; c<BK; c++) {
+                        const sa = document.getElementById(`sa-${r}-${c}`);
+                        if(sa) sa.textContent = '0';
+                    }
+                }
+                for(let r=0; r<BK; r++) {
+                    for(let c=0; c<BN; c++) {
+                        const sb = document.getElementById(`sb-${r}-${c}`);
+                        if(sb) sb.textContent = '0';
+                    }
+                }
+            }
+            updateUI();
+        }
+
+        function resetSim() {
+            state = {
+                blockX: 0, blockY: 0, tileIdx: 0, k: 0, m: 0,
+                isPlaying: false, speed: document.getElementById('speedSlider')?.value || 600, 
+                phase: 'init', 
+                regs: Array(THREADS_X * THREADS_Y).fill().map(() => [0, 0, 0, 0]),
+                Btmp: Array(THREADS_X * THREADS_Y).fill(0)
+            };
+            metrics = { global: 0, shared: 0, reg: 0 };
+            historyStack = [];
+            const playIcon = document.getElementById('playIcon');
+            if(playIcon) playIcon.textContent = '▶ Play';
+            if(timer) clearInterval(timer);
+            
+            DATA.C = Array.from({length: M}, () => Array.from({length: N}, () => 0));
+            DATA.As = Array.from({length: BM}, () => Array.from({length: BK}, () => 0));
+            DATA.Bs = Array.from({length: BK}, () => Array.from({length: BN}, () => 0));
+            
+            initGrids();
+            updateUI();
+        }
+
+        let timer;
+        function togglePlay() {
+            state.isPlaying = !state.isPlaying;
+            const playIcon = document.getElementById('playIcon');
+            if(playIcon) playIcon.textContent = state.isPlaying ? '⏸ Pause' : '▶ Play';
+            if (state.isPlaying) timer = setInterval(step, state.speed);
+            else clearInterval(timer);
+        }
+
+        const globalPlayBtn = document.getElementById('playBtn');
+        if(globalPlayBtn) globalPlayBtn.onclick = togglePlay;
+        
+        const globalStepBtn = document.getElementById('stepBtn');
+        if(globalStepBtn) globalStepBtn.onclick = step;
+
+        const globalStepBackBtn = document.getElementById('stepBackBtn');
+        if(globalStepBackBtn) globalStepBackBtn.onclick = stepBack;
+        
+        const globalResetBtn = document.getElementById('resetBtn');
+        if(globalResetBtn) globalResetBtn.onclick = resetSim;
+        
+        const globalSpeedSlider = document.getElementById('speedSlider');
+        if(globalSpeedSlider) {
+            globalSpeedSlider.oninput = (e) => {
+                state.speed = e.target.value;
+                const speedVal = document.getElementById('speedVal');
+                if(speedVal) speedVal.textContent = `${state.speed}ms`;
+                if (state.isPlaying) { clearInterval(timer); timer = setInterval(step, state.speed); }
+            };
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            initGrids();
+            setTimeout(updateUI, 50);
+            window.addEventListener('resize', updateUI);
+        });
+    </script>
+</body>
+</html>

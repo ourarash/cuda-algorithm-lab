@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA Thread to Memory Mapping - Pro Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
+        .code-font { font-family: 'Fira Code', monospace; }
+        canvas { cursor: crosshair; max-width: 100%; height: auto; touch-action: none; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
+        input[type=range] { accent-color: #6366f1; }
+    </style>
+</head>
+<body class="min-h-screen text-slate-800 p-4 md:p-6 flex flex-col items-center">
+
+    <div class="max-w-[1600px] w-full mb-6 text-left">
+        <h1 class="text-3xl font-bold text-slate-900 mb-1">Advanced Matrix Addition Mapping</h1>
+        <p class="text-slate-600">Explore boundary guards, coalesced memory access, and dynamic grid scaling.</p>
+    </div>
+
+    <div class="flex flex-col lg:flex-row gap-6 max-w-[1600px] w-full items-start">
+        
+        <!-- Sidebar (Left) -->
+        <aside class="w-full lg:w-[450px] shrink-0 space-y-4">
+            
+            <!-- 6. Interactive Controls -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+                <div class="flex items-center gap-2 mb-2 border-b border-slate-100 pb-2">
+                    <svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+                    <span class="font-bold text-sm text-slate-700 uppercase tracking-tight">Configuration</span>
+                </div>
+                
+                <div class="space-y-4">
+                    <div>
+                        <label class="flex justify-between text-xs font-bold text-slate-500 mb-1">
+                            MATRIX SIZE (N) <span id="label-n" class="text-indigo-600">8</span>
+                        </label>
+                        <input type="range" id="input-n" min="4" max="12" value="8" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer">
+                    </div>
+                    <div>
+                        <label class="flex justify-between text-xs font-bold text-slate-500 mb-1">
+                            BLOCK SIZE <span id="label-bs" class="text-indigo-600">4</span>
+                        </label>
+                        <input type="range" id="input-bs" min="2" max="6" value="4" class="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer">
+                    </div>
+                    <div class="pt-2">
+                        <label class="flex items-center gap-2 cursor-pointer group">
+                            <div class="relative">
+                                <input type="checkbox" id="input-coalesced" checked class="sr-only peer">
+                                <div class="w-10 h-5 bg-slate-300 rounded-full peer peer-checked:bg-indigo-600 transition-colors"></div>
+                                <div class="absolute left-1 top-1 w-3 h-3 bg-white rounded-full transition-transform peer-checked:translate-x-5"></div>
+                            </div>
+                            <span class="text-sm font-semibold text-slate-700">Row-Major (Coalesced)</span>
+                        </label>
+                        <p class="text-[10px] text-slate-400 mt-1 italic">Uncheck to see "Strided" Column-Major mapping (Bad for performance).</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Kernel Code -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="px-5 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <svg class="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"></path></svg>
+                        <span class="font-bold text-sm text-slate-700">Guard Logic</span>
+                    </div>
+                    <div id="guard-status" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700">Within Bounds</div>
+                </div>
+                <div class="bg-slate-900 p-4 custom-scrollbar">
+                    <pre class="code-font text-[12px] leading-relaxed text-slate-300">
+<span class="text-slate-500">// i, j calculated as usual...</span>
+<span id="line-i" class="transition-colors duration-200 px-1 rounded"><span class="text-teal-300">int</span> i = blockIdx.x * blockDim.x + threadIdx.x;</span>
+<span id="line-j" class="transition-colors duration-200 px-1 rounded"><span class="text-teal-300">int</span> j = blockIdx.y * blockDim.y + threadIdx.y;</span>
+<span id="line-idx" class="transition-colors duration-200 px-1 rounded"><span class="text-teal-300">int</span> index = <span id="code-math">i + j * N</span>;</span>
+
+<span id="line-guard" class="transition-colors duration-200 px-1 rounded"><span class="text-purple-400">if</span> (i < N && j < N) { <span class="text-slate-500">// "Out of Bounds" Check</span></span>
+  <span id="line-mem" class="transition-colors duration-200 px-1 rounded">c[index] = a[index] + b[index];</span>
+} <span id="line-else" class="text-slate-500 opacity-0 italic ml-4">/* Thread Idle */</span></pre>
+                </div>
+            </div>
+
+            <!-- Live Calculation -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-4">
+                <div id="calcPanel" class="space-y-3 code-font text-[14px] opacity-40 transition-opacity duration-300">
+                    <div class="flex justify-between p-2 bg-orange-50/50 rounded border border-orange-100 text-orange-900">
+                        <span>IDs</span>
+                        <span class="font-bold text-[12px]" id="calc-ids">B(?,?), T(?,?)</span>
+                    </div>
+
+                    <div class="p-3 bg-indigo-50 border border-indigo-100 rounded-lg space-y-1">
+                        <div class="flex justify-between items-center text-indigo-900">
+                            <span class="font-semibold">i</span>
+                            <span class="font-bold text-indigo-600" id="calc-i">?</span>
+                        </div>
+                        <div class="flex justify-between items-center text-indigo-900">
+                            <span class="font-semibold">j</span>
+                            <span class="font-bold text-indigo-600" id="calc-j">?</span>
+                        </div>
+                    </div>
+
+                    <div id="idx-box" class="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center">
+                        <div class="text-[12px] text-emerald-800 font-semibold mb-1" id="idx-label">Coalesced Index</div>
+                        <div class="text-[10px] text-emerald-600 italic mb-1" id="calc-idx-math">i + j * 8</div>
+                        <div class="text-4xl font-bold text-emerald-600" id="calc-idx">?</div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Visualization (Right) -->
+        <main class="flex-grow bg-white rounded-2xl shadow-xl border border-slate-200 p-6 flex flex-col items-center relative">
+            <canvas id="mappingCanvas" width="950" height="750" class="rounded-xl"></canvas>
+            
+            <div class="absolute bottom-4 right-4 bg-slate-900/80 text-white px-3 py-1.5 rounded-lg text-[11px] font-medium pointer-events-none backdrop-blur-sm">
+                HOVER TO TRACE MEMORY PATHS
+            </div>
+        </main>
+    </div>
+
+<script>
+    const canvas = document.getElementById('mappingCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // App State
+    let N = 8;
+    let blockDim = 4;
+    let gridDim = Math.ceil(N / blockDim);
+    let isRowMajor = true;
+
+    let hoveredThread = null;
+    let mousePos = { x: -100, y: -100 };
+    let time = 0;
+
+    // Layout
+    const execGrid = { x: 40, y: 80, size: 380 };
+    const memGrid = { x: 500, y: 80, size: 380 };
+    const memStacks = { x: 40, y: 560, w: 870, h: 25, gap: 35 };
+
+    // DOM Controls
+    const inputN = document.getElementById('input-n');
+    const inputBS = document.getElementById('input-bs');
+    const inputCoalesced = document.getElementById('input-coalesced');
+    const labelN = document.getElementById('label-n');
+    const labelBS = document.getElementById('label-bs');
+    
+    const calcPanel = document.getElementById('calcPanel');
+    const elIDs = document.getElementById('calc-ids');
+    const elI = document.getElementById('calc-i');
+    const elJ = document.getElementById('calc-j');
+    const elIdx = document.getElementById('calc-idx');
+    const elIdxMath = document.getElementById('calc-idx-math');
+    const elIdxLabel = document.getElementById('idx-label');
+    const codeMath = document.getElementById('code-math');
+    const guardStatus = document.getElementById('guard-status');
+    const lineGuard = document.getElementById('line-guard');
+    const lineElse = document.getElementById('line-else');
+
+    function updateParams() {
+        N = parseInt(inputN.value);
+        blockDim = parseInt(inputBS.value);
+        isRowMajor = inputCoalesced.checked;
+        gridDim = Math.ceil(N / blockDim);
+        
+        labelN.textContent = N;
+        labelBS.textContent = blockDim;
+        codeMath.textContent = isRowMajor ? "i + j * N" : "j + i * N";
+        elIdxLabel.textContent = isRowMajor ? "Coalesced Index" : "Strided (Non-Coalesced)";
+    }
+
+    [inputN, inputBS, inputCoalesced].forEach(i => i.addEventListener('input', updateParams));
+
+    function drawText(ctx, text, x, y, font, color, align="center") {
+        ctx.font = font; ctx.fillStyle = color; ctx.textAlign = align;
+        ctx.textBaseline = "middle"; ctx.fillText(text, x, y);
+    }
+
+    function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        time++;
+
+        const blockSizePx = execGrid.size / gridDim;
+        const threadSizePx = blockSizePx / blockDim;
+        const memCellPx = memGrid.size / N;
+        const cell1DW = memStacks.w / (N * N);
+
+        // Titles
+        drawText(ctx, "Thread Execution Grid", execGrid.x + execGrid.size/2, execGrid.y - 35, "600 16px Inter", "#475569");
+        drawText(ctx, `Logical ${N}x${N} Matrix`, memGrid.x + memGrid.size/2, memGrid.y - 35, "600 16px Inter", "#475569");
+        drawText(ctx, "Physical Memory Stacks (A + B = C)", memStacks.x + memStacks.w/2, memStacks.y - 30, "600 16px Inter", "#475569");
+
+        // --- 1. Execution Grid ---
+        for (let by = 0; by < gridDim; by++) {
+            for (let bx = 0; bx < gridDim; bx++) {
+                const bX = execGrid.x + bx * blockSizePx;
+                const bY = execGrid.y + by * blockSizePx;
+                
+                for (let ty = 0; ty < blockDim; ty++) {
+                    for (let tx = 0; tx < blockDim; tx++) {
+                        const i = bx * blockDim + tx;
+                        const j = by * blockDim + ty;
+                        const isGhost = i >= N || j >= N;
+                        const isHovered = hoveredThread && hoveredThread.bx === bx && hoveredThread.by === by && hoveredThread.tx === tx && hoveredThread.ty === ty;
+
+                        const tX = bX + tx * threadSizePx;
+                        const tY = bY + ty * threadSizePx;
+                        const pad = 2;
+
+                        if (isGhost) {
+                            ctx.fillStyle = isHovered ? "#94a3b8" : "#f1f5f9";
+                            ctx.strokeStyle = "#e2e8f0";
+                        } else {
+                            ctx.fillStyle = isHovered ? "#ef4444" : "#cbd5e1";
+                            ctx.strokeStyle = isHovered ? "#991b1b" : "#94a3b8";
+                        }
+                        
+                        ctx.lineWidth = isHovered ? 2 : 0.5;
+                        ctx.fillRect(tX + pad, tY + pad, threadSizePx - pad*2, threadSizePx - pad*2);
+                        ctx.strokeRect(tX + pad, tY + pad, threadSizePx - pad*2, threadSizePx - pad*2);
+                        
+                        if (isGhost && isHovered) {
+                            drawText(ctx, "∅", tX + threadSizePx/2, tY + threadSizePx/2, "bold 12px Inter", "#fff");
+                        }
+                    }
+                }
+                ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 1.5;
+                ctx.strokeRect(bX, bY, blockSizePx, blockSizePx);
+            }
+        }
+
+        // --- 2. Logical Matrix ---
+        for (let j = 0; j < N; j++) {
+            for (let i = 0; i < N; i++) {
+                const cx = memGrid.x + i * memCellPx;
+                const cy = memGrid.y + j * memCellPx;
+                const isHovered = hoveredThread && hoveredThread.i === i && hoveredThread.j === j;
+                
+                ctx.fillStyle = isHovered ? "#3b82f6" : "#f8fafc";
+                ctx.strokeStyle = isHovered ? "#1e3a8a" : "#cbd5e1";
+                ctx.lineWidth = isHovered ? 2 : 0.5;
+                ctx.fillRect(cx, cy, memCellPx, memCellPx);
+                ctx.strokeRect(cx, cy, memCellPx, memCellPx);
+            }
+        }
+        ctx.strokeStyle = "#3b82f6"; ctx.lineWidth = 2;
+        ctx.strokeRect(memGrid.x, memGrid.y, memGrid.size, memGrid.size);
+
+        // --- 3. 1D Physical Memory Stacks (A, B, C) ---
+        const labels = ["Array A", "Array B", "Array C"];
+        const colors = ["#818cf8", "#f472b6", "#10b981"];
+        const hoverColors = ["#4f46e5", "#db2777", "#059669"];
+
+        for (let s = 0; s < 3; s++) {
+            const sy = memStacks.y + s * memStacks.gap;
+            drawText(ctx, labels[s], memStacks.x - 10, sy + memStacks.h/2, "bold 11px Inter", colors[s], "right");
+
+            for (let idx = 0; idx < N * N; idx++) {
+                const rx = memStacks.x + idx * cell1DW;
+                const isHovered = hoveredThread && !hoveredThread.isGhost && hoveredThread.index === idx;
+                
+                ctx.fillStyle = isHovered ? hoverColors[s] : "#f1f5f9";
+                ctx.strokeStyle = isHovered ? "#000" : "#cbd5e1";
+                ctx.lineWidth = isHovered ? 2 : 0.5;
+                ctx.fillRect(rx, sy, cell1DW, memStacks.h);
+                ctx.strokeRect(rx, sy, cell1DW, memStacks.h);
+
+                if (idx % N === 0) {
+                    ctx.beginPath(); ctx.strokeStyle = "rgba(0,0,0,0.1)";
+                    ctx.moveTo(rx, sy); ctx.lineTo(rx, sy + memStacks.h); ctx.stroke();
+                }
+            }
+        }
+
+        // --- Connections & Data Flow ---
+        if (hoveredThread) {
+            const { bx, by, tx, ty, i, j, index, isGhost } = hoveredThread;
+            const tCX = execGrid.x + bx * blockSizePx + tx * threadSizePx + threadSizePx/2;
+            const tCY = execGrid.y + by * blockSizePx + ty * threadSizePx + threadSizePx/2;
+            
+            if (!isGhost) {
+                const mCX = memGrid.x + i * memCellPx + memCellPx/2;
+                const mCY = memGrid.y + j * memCellPx + memCellPx/2;
+                const rCX = memStacks.x + index * cell1DW + cell1DW/2;
+
+                // Path 1: Thread to Matrix
+                ctx.beginPath(); ctx.setLineDash([5, 3]); ctx.lineWidth = 2;
+                ctx.strokeStyle = "rgba(59, 130, 246, 0.5)";
+                ctx.moveTo(tCX, tCY);
+                ctx.bezierCurveTo(tCX + 150, tCY, mCX - 150, mCY, mCX, mCY);
+                ctx.stroke();
+
+                // Path 2: Inputs (A, B) to Matrix
+                [0, 1].forEach(s => {
+                    ctx.beginPath(); ctx.strokeStyle = colors[s] + "88";
+                    const sy = memStacks.y + s * memStacks.gap;
+                    ctx.moveTo(rCX, sy);
+                    ctx.bezierCurveTo(rCX, sy - 50, mCX, mCY + 100, mCX, mCY);
+                    ctx.stroke();
+                });
+
+                // Path 3: Output (C)
+                ctx.beginPath(); ctx.strokeStyle = colors[2] + "88";
+                const cy = memStacks.y + 2 * memStacks.gap;
+                ctx.moveTo(mCX, mCY);
+                ctx.bezierCurveTo(mCX, mCY + 150, rCX, cy - 100, rCX, cy);
+                ctx.stroke();
+
+                // Flow Particles
+                const particlePos = (time * 0.02) % 1;
+                ctx.setLineDash([]); ctx.fillStyle = "#fff";
+                ctx.beginPath(); ctx.arc(mCX, mCY, 4, 0, Math.PI*2); ctx.fill();
+            } else {
+                // Ghost Thread Indicator
+                ctx.beginPath(); ctx.strokeStyle = "#94a3b8"; ctx.setLineDash([2, 2]);
+                ctx.moveTo(tCX, tCY); ctx.lineTo(tCX + 40, tCY); ctx.stroke();
+                drawText(ctx, "Out of Bounds", tCX + 45, tCY, "italic 11px Inter", "#64748b", "left");
+            }
+        }
+
+        requestAnimationFrame(render);
+    }
+
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        mousePos.x = (e.clientX - rect.left) * scaleX;
+        mousePos.y = (e.clientY - rect.top) * scaleY;
+
+        let found = null;
+        if (mousePos.x >= execGrid.x && mousePos.x <= execGrid.x + execGrid.size &&
+            mousePos.y >= execGrid.y && mousePos.y <= execGrid.y + execGrid.size) {
+            const lx = mousePos.x - execGrid.x; const ly = mousePos.y - execGrid.y;
+            const blockSizePx = execGrid.size / gridDim;
+            const threadSizePx = blockSizePx / blockDim;
+            const bx = Math.floor(lx / blockSizePx); const by = Math.floor(ly / blockSizePx);
+            const tx = Math.floor((lx % blockSizePx) / threadSizePx);
+            const ty = Math.floor((ly % blockSizePx) / threadSizePx);
+            const i = bx * blockDim + tx; const j = by * blockDim + ty;
+            const isGhost = i >= N || j >= N;
+            const index = isRowMajor ? (i + j * N) : (j + i * N);
+            found = { bx, by, tx, ty, i, j, index, isGhost };
+        }
+        if (JSON.stringify(found) !== JSON.stringify(hoveredThread)) {
+            hoveredThread = found;
+            updateUI(found);
+        }
+    });
+
+    function updateUI(t) {
+        if (!t) {
+            calcPanel.classList.add('opacity-40');
+            guardStatus.className = "hidden";
+            lineGuard.className = lineElse.className = "transition-all opacity-0";
+            return;
+        }
+        calcPanel.classList.remove('opacity-40');
+        elIDs.textContent = `B(${t.bx},${t.by}), T(${t.tx},${t.ty})`;
+        elI.textContent = t.i; elJ.textContent = t.j;
+        elIdx.textContent = t.isGhost ? "∅" : t.index;
+        elIdxMath.textContent = isRowMajor ? `${t.i} + ${t.j} * ${N}` : `${t.j} + ${t.i} * ${N}`;
+
+        if (t.isGhost) {
+            guardStatus.textContent = "IDLE (GHOST)";
+            guardStatus.className = "text-[10px] px-2 py-0.5 rounded-full font-bold bg-slate-200 text-slate-500 block";
+            lineGuard.className = "bg-red-500/20 text-red-400 block px-1 rounded";
+            lineElse.className = "text-amber-400 opacity-100 italic ml-4";
+            document.getElementById('idx-box').className = "p-4 bg-slate-50 border border-slate-200 rounded-xl text-center grayscale";
+        } else {
+            guardStatus.textContent = "ACTIVE";
+            guardStatus.className = "text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-100 text-emerald-700 block";
+            lineGuard.className = "bg-emerald-500/20 text-emerald-400 block px-1 rounded";
+            lineElse.className = "opacity-0";
+            document.getElementById('idx-box').className = "p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-center";
+        }
+    }
+
+    render();
+</script>
+</body>
+</html>

@@ -1,3 +1,17 @@
+/*
+ * Register-Tiled Matrix Multiplication
+ *
+ * Intention:
+ * This file increases work per thread so each thread reuses values from shared
+ * memory more aggressively and performs more math per memory fetch.
+ *
+ * High-Level Algorithm:
+ * - Use shared-memory tiling for the block-level data movement.
+ * - Give each thread responsibility for a vertical strip of output values.
+ * - Keep those partial sums in registers.
+ * - Reuse each loaded B value across several outputs computed by the same
+ *   thread.
+ */
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -61,9 +75,11 @@ __global__ void sgemm_register_tiling(int M, int N, int K, float alpha,
 
   float threadResults[TM] = {0.0f};
 
+  // Loop over K dimension in chunks/tiles of size BK
   for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
     const int threadId = threadIdx.y * blockDim.x + threadIdx.x;
 
+    // Load a tile of A from global memory into shared memory
     int a_tile_row = threadId / BK;
     int a_tile_col = threadId % BK;
     int a_global_row = blockRow + a_tile_row;
@@ -75,6 +91,7 @@ __global__ void sgemm_register_tiling(int M, int N, int K, float alpha,
       As[a_tile_row][a_tile_col] = 0.0f;
     }
 
+    // Load a tile of B from global memory into shared memory
     int b_tile_row = threadId / BN;
     int b_tile_col = threadId % BN;
     int b_global_row = bkIdx + b_tile_row;
@@ -86,28 +103,33 @@ __global__ void sgemm_register_tiling(int M, int N, int K, float alpha,
       Bs[b_tile_row][b_tile_col] = 0.0f;
     }
 
+    // Synchronize to ensure all threads have finished loading the tiles
     __syncthreads();
 
+    // Compute the dot product for the current tiles
     for (int dotIdx = 0; dotIdx < BK; ++dotIdx) {
-      float Btmp = Bs[dotIdx][threadCol];
+      float regB = Bs[dotIdx][threadCol];
 #pragma unroll
-      for (int resIdx = 0; resIdx < TM; ++resIdx) {
-        threadResults[resIdx] += As[threadRow * TM + resIdx][dotIdx] * Btmp;
+      // Accumulate partial sums into thread-local registers
+      for (int resultIndex = 0; resultIndex < TM; ++resultIndex) {
+        threadResults[resultIndex] += As[threadRow * TM + resultIndex][dotIdx] * regB;
       }
     }
 
+    // Synchronize to ensure all threads have finished computing before overwriting shared memory
     __syncthreads();
   }
 
+// Write the accumulated results from registers back to global memory C
 #pragma unroll
-  for (int i = 0; i < TM; ++i) {
-    int c_row = blockRow + threadRow * TM + i;
+  for (int resultIndex = 0; resultIndex < TM; ++resultIndex) {
+    int c_row = blockRow + threadRow * TM + resultIndex;
     int c_col = blockCol + threadCol;
 
     if (c_row < M && c_col < N) {
       // C = α*(A@B)+β*C
       C[c_row * N + c_col] =
-          alpha * threadResults[i] + beta * C[c_row * N + c_col];
+          alpha * threadResults[resultIndex] + beta * C[c_row * N + c_col];
     }
   }
 }

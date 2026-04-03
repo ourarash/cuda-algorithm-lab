@@ -1,0 +1,42 @@
+{
+  "name": "repo-commit-helper",
+  "version": "0.1.0",
+  "description": "Repo-local commit helper for the cuda-algorithm-lab CUDA examples and visualizations repository.",
+  "author": {
+    "name": "Arash Saifhashemi",
+    "url": "https://github.com/ourarash"
+  },
+  "homepage": "https://github.com/ourarash/cuda-algorithm-lab",
+  "repository": "https://github.com/ourarash/cuda-algorithm-lab",
+  "license": "MIT",
+  "keywords": [
+    "cuda",
+    "git",
+    "commit",
+    "conventional-commits",
+    "repo-workflow",
+    "visualization",
+    "education"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Repo Commit Helper",
+    "shortDescription": "Draft repo-aware Conventional Commit messages for this CUDA repo",
+    "longDescription": "Analyzes staged changes deeply, asks whether to stage all current files when nothing is staged, and prepares or helps execute Conventional Commits for this CUDA kernels, algorithms, and visualization repository.",
+    "developerName": "Arash Saifhashemi",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "privacyPolicyURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "termsOfServiceURL": "https://github.com/ourarash/cuda-algorithm-lab",
+    "defaultPrompt": [
+      "Use $repo-commit-helper to prepare a commit for the current repo.",
+      "Use $repo-commit-helper to draft a Conventional Commit from staged changes.",
+      "Use $repo-commit-helper to commit current CUDA or visualization work and ask to stage all if nothing is staged."
+    ],
+    "brandColor": "#10B981"
+  }
+}

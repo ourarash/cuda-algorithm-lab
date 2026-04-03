@@ -1,3 +1,17 @@
+/*
+ * Uncoalesced Matrix Multiplication
+ *
+ * Intention:
+ * This file intentionally demonstrates a poor thread-to-data mapping so the
+ * memory-access anti-pattern is easy to see.
+ *
+ * High-Level Algorithm:
+ * - Launch a 2D thread block.
+ * - Let each thread compute one output element C[i, j].
+ * - Map threadIdx.x to rows instead of columns, which makes neighboring
+ *   threads walk through memory with a large stride.
+ * - Use this version as the baseline that later kernels improve upon.
+ */
 #include <cassert>
 #include <cmath>
 #include <cuda_runtime.h>

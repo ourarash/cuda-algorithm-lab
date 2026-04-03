@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA Shared Memory Reduction</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Inter:wght@400;500;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+
+        pre {
+            font-family: 'Fira Code', monospace;
+            tab-size: 4;
+        }
+
+        .code-line {
+            padding: 2px 12px;
+            border-left: 3px solid transparent;
+            transition: all 0.2s ease;
+        }
+
+        .code-line.active {
+            background-color: rgba(56, 189, 248, 0.15);
+            /* sky blue */
+            border-left: 3px solid #38bdf8;
+        }
+
+        /* Custom Range Slider */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #38bdf8;
+            cursor: pointer;
+            margin-top: -6px;
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+            transition: transform 0.1s;
+        }
+
+        input[type=range]::-webkit-slider-thumb:active {
+            transform: scale(1.2);
+        }
+
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #334155;
+            border-radius: 2px;
+        }
+
+        input[type=range]:focus {
+            outline: none;
+        }
+
+        .thread-box {
+            transition: all 0.2s ease;
+            cursor: pointer;
+            min-width: 3rem;
+        }
+
+        .thread-box:hover {
+            transform: translateY(-2px);
+            filter: brightness(1.2);
+        }
+
+        .thread-box.inactive {
+            background-color: #991b1b;
+            border-color: #ef4444;
+            opacity: 0.6;
+        }
+
+        .thread-box.idle {
+            background-color: #334155;
+            border-color: #475569;
+        }
+
+        #threads-container::-webkit-scrollbar {
+            height: 6px;
+        }
+
+        #threads-container::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.5);
+            border-radius: 3px;
+        }
+
+        #threads-container::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 3px;
+        }
+
+        #canvas-container {
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+    </style>
+</head>
+
+<body class="h-screen flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <header
+        class="h-16 px-6 border-b border-slate-800 bg-slate-900/80 backdrop-blur flex justify-between items-center z-20 shadow-md flex-shrink-0">
+        <div>
+            <h1
+                class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-sky-400 to-indigo-400 flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                    stroke="url(#gradient)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                            <stop offset="0%" stop-color="#38bdf8" />
+                            <stop offset="100%" stop-color="#818cf8" />
+                        </linearGradient>
+                    </defs>
+                    <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                    <rect x="9" y="9" width="6" height="6"></rect>
+                    <line x1="9" y1="1" x2="9" y2="4"></line>
+                    <line x1="15" y1="1" x2="15" y2="4"></line>
+                    <line x1="9" y1="20" x2="9" y2="23"></line>
+                    <line x1="15" y1="20" x2="15" y2="23"></line>
+                    <line x1="20" y1="9" x2="23" y2="9"></line>
+                    <line x1="20" y1="14" x2="23" y2="14"></line>
+                    <line x1="1" y1="9" x2="4" y2="9"></line>
+                    <line x1="1" y1="14" x2="4" y2="14"></line>
+                </svg>
+                CUDA Shared Memory Reduction
+            </h1>
+            <p class="text-xs text-slate-400 font-mono">1 Block | 8 Threads | 4 Segments/Thread (N=32)</p>
+        </div>
+
+        <div class="flex items-center gap-4">
+            <div
+                class="flex items-center gap-2 bg-slate-800/80 p-1.5 rounded-lg border border-slate-700 shadow-inner hidden md:flex">
+                <button id="btn-toggle-val"
+                    class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 transition text-xs font-semibold flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 12h10" />
+                        <path d="M9 4v16" />
+                        <path d="m3 9 3 3-3 3" />
+                    </svg>
+                    <span>Show Indices</span>
+                </button>
+            </div>
+
+            <!-- Playback Controls -->
+            <div class="flex items-center gap-2 bg-slate-800 p-1.5 rounded-lg border border-slate-700">
+                <button id="btn-reset" class="p-2 hover:bg-slate-700 rounded text-slate-300 hover:text-white transition"
+                    title="Reset">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                        <path d="M3 3v5h5" />
+                    </svg>
+                </button>
+                <button id="btn-back"
+                    class="p-2 bg-slate-700 hover:bg-slate-600 rounded text-white transition flex items-center justify-center w-10 h-10 shadow disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Step Back (Left Arrow)">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                    </svg>
+                </button>
+                <button id="btn-next"
+                    class="p-2 bg-sky-600 hover:bg-sky-500 rounded text-white transition flex items-center justify-center w-10 h-10 shadow-lg shadow-sky-900/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Step Forward (Right Arrow)">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="9 18 15 12 9 6"></polyline>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div class="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
+
+        <!-- Visualization Area -->
+        <main id="canvas-container" class="flex-1 relative overflow-hidden flex flex-col">
+            <canvas id="viz-canvas" class="absolute inset-0 w-full h-full"></canvas>
+
+            <div
+                class="absolute bottom-6 right-6 bg-slate-900/90 backdrop-blur-md border border-slate-700 p-3 rounded-lg flex flex-col sm:flex-row gap-4 text-xs font-medium shadow-xl z-10">
+                <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-sm bg-slate-600 border border-slate-400"></div> Global Memory
+                </div>
+                <div class="flex items-center gap-2">
+                    <div class="w-3 h-3 rounded-sm bg-indigo-500 border border-indigo-400"></div> Shared Memory
+                </div>
+            </div>
+
+            <div id="phase-badge"
+                class="absolute top-6 right-6 bg-sky-900/80 text-sky-300 border border-sky-500/50 px-4 py-2 rounded-full text-sm font-bold shadow-xl shadow-sky-900/20 z-10 uppercase tracking-widest backdrop-blur-md transition-all duration-300">
+                Initialization
+            </div>
+        </main>
+
+        <!-- Information / Control Sidebar -->
+        <aside
+            class="w-full lg:w-[450px] bg-slate-800/90 border-l border-slate-700 flex flex-col z-10 shadow-2xl flex-shrink-0">
+            <div class="p-5 flex-1 overflow-y-auto space-y-5">
+
+                <!-- Playback Slider -->
+                <div class="bg-slate-900/50 p-4 rounded-xl border border-slate-700/50">
+                    <div class="flex justify-between items-end mb-3">
+                        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Execution Timeline
+                        </h2>
+                        <span id="progress-text"
+                            class="text-xs font-mono text-sky-400 bg-sky-400/10 px-2 py-1 rounded">Step 0</span>
+                    </div>
+                    <input type="range" id="progress-slider" min="0" max="8" step="1" value="0">
+                </div>
+
+                <!-- Live Metrics -->
+                <div class="grid grid-cols-2 gap-2">
+                    <div class="bg-slate-900 rounded-lg p-2 xl:p-3 border border-slate-700">
+                        <div class="text-[10px] xl:text-xs text-slate-400 mb-1">Active Memory</div>
+                        <div id="metric-mem" class="text-sm xl:text-base font-bold text-slate-300 font-mono">None</div>
+                    </div>
+                    <div class="bg-slate-900 rounded-lg p-2 xl:p-3 border border-slate-700">
+                        <div class="text-[10px] xl:text-xs text-slate-400 mb-1">Contiguous Threads?</div>
+                        <div id="metric-contiguous" class="text-sm xl:text-base font-bold text-sky-400 font-mono">Yes
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Code View -->
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-2 flex justify-between">
+                        Kernel Code Tracking
+                        <span class="text-xs text-slate-500 normal-case font-normal">(Shared & Coarsened)</span>
+                    </h2>
+                    <div class="bg-slate-950 rounded-lg border border-slate-800 overflow-hidden text-sm shadow-inner">
+                        <pre id="code-block" class="py-3 overflow-x-auto text-slate-300"><code class="block">
+<div class="code-line" id="line-1"><span class="text-purple-400">unsigned int</span> tid <span class="text-cyan-400">=</span> <span class="text-blue-400">threadIdx</span>.x;</div>
+<div class="code-line" id="line-2"><span class="text-purple-400">unsigned int</span> i <span class="text-cyan-400">=</span> <span class="text-blue-400">blockIdx</span>.x <span class="text-cyan-400">*</span> <span class="text-blue-400">blockDim</span>.x <span class="text-cyan-400">*</span> <span class="text-yellow-300">4</span> <span class="text-cyan-400">+</span> tid;</div>
+<div class="code-line" id="line-3"><span class="text-blue-400">__shared__</span> <span class="text-purple-400">float</span> sharedData[<span class="text-orange-400">BLOCK_SIZE</span>];</div>
+<div class="code-line" id="line-4">sharedData[tid] <span class="text-cyan-400">=</span> <span class="text-yellow-300">0.0f</span>;</div>
+<div class="code-line" id="line-5"></div>
+<div class="code-line" id="line-6"><span class="text-slate-500">// Phase 1: Global-to-Shared Accumulation</span></div>
+<div class="code-line" id="line-7"><span class="text-purple-400">for</span> (<span class="text-purple-400">int</span> j <span class="text-cyan-400">=</span> <span class="text-yellow-300">0</span>; j <span class="text-cyan-400"><</span> <span class="text-yellow-300">4</span>; <span class="text-cyan-400">++</span>j) {</div>
+<div class="code-line" id="line-8">  sharedData[tid] <span class="text-cyan-400">+=</span> input[i <span class="text-cyan-400">+</span> j <span class="text-cyan-400">*</span> <span class="text-blue-400">blockDim</span>.x];</div>
+<div class="code-line" id="line-9">}</div>
+<div class="code-line" id="line-10"><span class="text-blue-400">__syncthreads</span>();</div>
+<div class="code-line" id="line-11"></div>
+<div class="code-line" id="line-12"><span class="text-slate-500">// Phase 2: Tree Reduction (Shrinking Stride)</span></div>
+<div class="code-line" id="line-13"><span class="text-purple-400">for</span> (<span class="text-purple-400">int</span> stride <span class="text-cyan-400">=</span> <span class="text-blue-400">blockDim</span>.x <span class="text-cyan-400">/</span> <span class="text-yellow-300">2</span>; stride <span class="text-cyan-400">></span> <span class="text-yellow-300">0</span>; stride <span class="text-cyan-400">/=</span> <span class="text-yellow-300">2</span>) {</div>
+<div class="code-line" id="line-14">  <span class="text-purple-400">if</span> (tid <span class="text-cyan-400"><</span> stride) {</div>
+<div class="code-line" id="line-15">    sharedData[tid] <span class="text-cyan-400">+=</span> sharedData[tid <span class="text-cyan-400">+</span> stride];</div>
+<div class="code-line" id="line-16">  }</div>
+<div class="code-line" id="line-17">  <span class="text-blue-400">__syncthreads</span>();</div>
+<div class="code-line" id="line-18">}</div>
+<div class="code-line" id="line-19"></div>
+<div class="code-line" id="line-20"><span class="text-purple-400">if</span> (tid <span class="text-cyan-400">==</span> <span class="text-yellow-300">0</span>) partialSums[<span class="text-blue-400">blockIdx</span>.x] <span class="text-cyan-400">=</span> sharedData[<span class="text-yellow-300">0</span>];</div>
+                        </code></pre>
+                    </div>
+                </div>
+
+                <!-- Explanation -->
+                <div>
+                    <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-2">Analysis</h2>
+                    <div class="bg-indigo-900/20 border border-indigo-800/50 rounded-lg p-4 text-sm text-slate-300 leading-relaxed min-h-[140px]"
+                        id="explanation-box">
+                        Waiting for simulation to start...
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Footer: Warp Divergence Monitor -->
+    <footer
+        class="h-28 bg-slate-900 border-t border-slate-800 flex flex-col z-20 flex-shrink-0 p-3 lg:p-4 shadow-[0_-10px_20px_rgba(0,0,0,0.3)]">
+        <div class="flex justify-between items-center mb-2">
+            <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path
+                        d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z">
+                    </path>
+                </svg>
+                Thread Activity Monitor <span class="text-slate-500 font-normal italic">(Hover to track mapping)</span>
+            </h3>
+            <div class="flex gap-4 text-xs font-mono hidden sm:flex">
+                <span class="flex items-center gap-1">
+                    <div class="w-2 h-2 rounded-full bg-sky-500"></div> Active
+                </span>
+                <span class="flex items-center gap-1">
+                    <div class="w-2 h-2 rounded-full bg-red-500"></div> Idle
+                </span>
+            </div>
+        </div>
+        <div id="threads-container"
+            class="flex-1 flex gap-1 md:gap-2 justify-start md:justify-center w-full max-w-6xl mx-auto items-center overflow-x-auto pb-1 px-2">
+            <!-- Dynamically generated threads -->
+        </div>
+    </footer>
+
+    <script>
+        /**
+         * Core Configuration & State
+         */
+        const BLOCK_SIZE = 8;
+        const SEGMENTS = 4;
+        const N = BLOCK_SIZE * SEGMENTS; // 32
+
+        let globalData = [];
+        let sharedHistory = []; // Tracks sharedData at each step [0..8]
+
+        let showIndices = false;
+        let hoveredThread = null;
+
+        const threadColors = [
+            '#ef4444', '#f97316', '#f59e0b', '#84cc16',
+            '#22c55e', '#10b981', '#06b6d4', '#3b82f6'
+        ];
+
+        let state = {
+            progress: 0,
+            maxSteps: 8
+        };
+
+        const uiElements = {
+            progressText: document.getElementById('progress-text'),
+            metricMem: document.getElementById('metric-mem'),
+            metricContiguous: document.getElementById('metric-contiguous'),
+            explanationBox: document.getElementById('explanation-box'),
+            phaseBadge: document.getElementById('phase-badge'),
+            codeLines: Array.from({ length: 20 }, (_, i) => document.getElementById(`line-${i + 1}`))
+        };
+
+        const slider = document.getElementById('progress-slider');
+        const btnNext = document.getElementById('btn-next');
+        const btnBack = document.getElementById('btn-back');
+        const btnReset = document.getElementById('btn-reset');
+        const btnToggleVal = document.getElementById('btn-toggle-val');
+        const canvas = document.getElementById('viz-canvas');
+        const ctx = canvas.getContext('2d');
+        const threadsContainer = document.getElementById('threads-container');
+
+        /**
+         * Initialization Logic
+         */
+        function initData() {
+            // Generate Random Global Memory (1-5 for readable sums)
+            globalData = Array.from({ length: N }, () => Math.floor(Math.random() * 5) + 1);
+            sharedHistory = [];
+
+            // Step 0: Init shared to zeros
+            sharedHistory[0] = Array(BLOCK_SIZE).fill(0);
+
+            // Steps 1 to 4: Phase 1 (Global-to-Shared Accumulation)
+            for (let j = 0; j < SEGMENTS; j++) {
+                let prev = [...sharedHistory[j]];
+                for (let tid = 0; tid < BLOCK_SIZE; tid++) {
+                    prev[tid] += globalData[j * BLOCK_SIZE + tid];
+                }
+                sharedHistory[j + 1] = prev;
+            }
+
+            // Steps 5 to 7: Phase 2 (Tree Reduction)
+            let currentStep = 5;
+            // Note: Used Math.floor(stride / 2) to mirror C++ integer division precisely and avoid JS float division issues
+            for (let stride = BLOCK_SIZE / 2; stride >= 1; stride = Math.floor(stride / 2)) {
+                let prev = [...sharedHistory[currentStep - 1]];
+                for (let tid = 0; tid < BLOCK_SIZE; tid++) {
+                    if (tid < stride) {
+                        prev[tid] += prev[tid + stride];
+                    }
+                }
+                sharedHistory[currentStep] = prev;
+                currentStep++;
+            }
+
+            // Step 8: Final Write Out
+            sharedHistory[8] = [...sharedHistory[7]];
+
+            state.progress = 0;
+            slider.max = state.maxSteps;
+
+            initThreadsUI();
+            resizeCanvas();
+            updateUI();
+        }
+
+        function initThreadsUI() {
+            threadsContainer.innerHTML = '';
+            for (let i = 0; i < BLOCK_SIZE; i++) {
+                const el = document.createElement('div');
+                el.className = 'flex-1 h-full rounded border-2 flex flex-col items-center justify-center font-mono text-sm thread-box idle relative overflow-hidden';
+                el.id = `thread-${i}`;
+                el.dataset.tid = i;
+                threadsContainer.appendChild(el);
+            }
+        }
+
+        /**
+         * Canvas Drawing
+         */
+        function resizeCanvas() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.scale(dpr, dpr);
+            canvas.style.width = `${rect.width}px`;
+            canvas.style.height = `${rect.height}px`;
+            renderCanvas();
+        }
+
+        function drawBox(ctx, x, y, size, val, textStr, bgColor, borderColor, textColor, blurColor = null) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.roundRect(x, y, size, size, 4);
+
+            if (blurColor) {
+                ctx.shadowColor = blurColor;
+                ctx.shadowBlur = 12;
+            }
+
+            ctx.fillStyle = bgColor;
+            ctx.fill();
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = borderColor;
+            ctx.stroke();
+
+            ctx.fillStyle = textColor;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = `bold ${size * 0.35}px 'Fira Code'`;
+            ctx.shadowBlur = 0;
+            ctx.fillText(textStr, x + size / 2, y + size / 2 + 1);
+            ctx.restore();
+        }
+
+        function renderCanvas() {
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+            ctx.clearRect(0, 0, w, h);
+
+            const p = state.progress;
+            const paddingX = w > 600 ? 60 : 20;
+            const usableWidth = w - (paddingX * 2);
+
+            // Sizes and positions based on available height
+            const boxSize = Math.min(32, usableWidth / BLOCK_SIZE - 4);
+            const startX = paddingX + (usableWidth - (BLOCK_SIZE * (boxSize + 4))) / 2;
+
+            // Calculate dynamic Y positions to spread out nicely
+            const topMargin = 50;
+            const rowGap = boxSize + 6;
+
+            // Global Memory coordinates
+            const gmTitleY = topMargin;
+            const gmStartY = gmTitleY + 15;
+
+            // Shared Memory coordinates (leaves room for arrows from GM)
+            const smTitleY = gmStartY + (SEGMENTS * rowGap) + 40;
+            // Increased gap here to make room for the new highlight labels
+            const smStartY = smTitleY + 30;
+
+            // Tree coordinates
+            const treeStartY = smStartY + boxSize + 30;
+            const treeLayerGap = 50;
+
+            // --- 1. Draw Global Memory (Grid of 4 rows x 8 cols) ---
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '12px Inter';
+            ctx.textAlign = 'left';
+            ctx.fillText('Global Memory (Input Segments)', startX, gmTitleY);
+
+            for (let j = 0; j < SEGMENTS; j++) {
+                for (let tid = 0; tid < BLOCK_SIZE; tid++) {
+                    const idx = j * BLOCK_SIZE + tid;
+                    const x = startX + tid * (boxSize + 4);
+                    const y = gmStartY + j * rowGap;
+
+                    let bg = '#1e293b'; let bc = '#334155'; let tc = '#cbd5e1'; let blur = null;
+
+                    // Highlight logic
+                    if (p > 0 && p <= 4) { // Phase 1 active
+                        if (p - 1 === j) { // Current row being read
+                            if (hoveredThread === null || hoveredThread === tid) {
+                                bg = threadColors[tid] + '40'; // Transparent thread color
+                                bc = threadColors[tid];
+                                tc = '#ffffff';
+                                blur = hoveredThread === tid ? threadColors[tid] : null;
+                            } else {
+                                bg = '#0f172a'; bc = '#1e293b'; tc = '#475569'; // dim
+                            }
+                        } else if (p - 1 > j) {
+                            bg = '#1e293b'; bc = '#334155'; tc = '#64748b'; // already read
+                        }
+                    } else if (p > 4) {
+                        bg = '#0f172a'; bc = '#1e293b'; tc = '#475569'; // dim out GM in phase 2
+                    }
+
+                    const val = globalData[idx];
+                    const text = showIndices ? `[${idx}]` : val;
+                    drawBox(ctx, x, y, boxSize, val, text, bg, bc, tc, blur);
+                }
+
+                // Draw row label 'j'
+                ctx.fillStyle = '#64748b';
+                ctx.font = '10px Inter';
+                ctx.textAlign = 'right';
+                ctx.fillText(`j=${j}`, startX - 10, gmStartY + j * rowGap + boxSize / 2 + 3);
+            }
+
+            // --- Draw Arrows between Global and Shared if in Phase 1 ---
+            if (p > 0 && p <= 4) {
+                const j = p - 1;
+                for (let tid = 0; tid < BLOCK_SIZE; tid++) {
+                    if (hoveredThread !== null && hoveredThread !== tid) continue;
+
+                    const x = startX + tid * (boxSize + 4) + boxSize / 2;
+                    const topY = gmStartY + j * rowGap + boxSize;
+                    const botY = smStartY - 5;
+
+                    ctx.beginPath();
+                    ctx.moveTo(x, topY);
+                    ctx.lineTo(x, botY);
+                    ctx.strokeStyle = threadColors[tid];
+                    ctx.lineWidth = hoveredThread === tid ? 3 : 1.5;
+                    ctx.shadowColor = threadColors[tid];
+                    ctx.shadowBlur = hoveredThread === tid ? 10 : 0;
+
+                    // Arrow head
+                    ctx.lineTo(x - 3, botY - 5);
+                    ctx.moveTo(x, botY);
+                    ctx.lineTo(x + 3, botY - 5);
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+                }
+            }
+
+            // --- 2. Draw Shared Memory (1 row x 8 cols) ---
+            ctx.fillStyle = '#a5b4fc';
+            ctx.font = '12px Inter';
+            ctx.textAlign = 'left';
+            ctx.fillText('__shared__ float sharedData[8]', startX, smTitleY - 10);
+
+            for (let tid = 0; tid < BLOCK_SIZE; tid++) {
+                const x = startX + tid * (boxSize + 4);
+                const y = smStartY;
+
+                let bg = '#312e81'; let bc = '#4f46e5'; let tc = '#ffffff'; let blur = null;
+
+                // Dimming based on hover and phase
+                if (hoveredThread !== null && hoveredThread !== tid) {
+                    bg = '#1e1b4b'; bc = '#312e81'; tc = '#4f46e5'; // dim
+                } else if (hoveredThread === tid) {
+                    bg = threadColors[tid]; bc = '#ffffff'; blur = threadColors[tid];
+                }
+
+                // In Phase 2, grey out unused shared mem slots
+                if (p > 4) {
+                    let activeSlots = 8;
+                    if (p === 6) activeSlots = 4;
+                    if (p === 7) activeSlots = 2;
+                    if (p >= 8) activeSlots = 1;
+
+                    if (tid >= activeSlots && hoveredThread !== tid) {
+                        bg = '#1e293b'; bc = '#334155'; tc = '#64748b'; // inactive
+                    }
+                }
+
+                // Safely read the value to prevent crashes if something is momentarily out of bounds
+                const val = (sharedHistory[p] && sharedHistory[p][tid] !== undefined) ? sharedHistory[p][tid] : 0;
+                const text = showIndices ? `s[${tid}]` : (val === 0 ? "0" : val);
+                drawBox(ctx, x, y, boxSize, val, text, bg, bc, tc, blur);
+            }
+
+            // --- 2.5 Emphasize Contiguous Threads in Phase 2 ---
+            if (p >= 5 && p <= 7) {
+                const currentStride = BLOCK_SIZE / Math.pow(2, p - 4);
+
+                // Active Region (Packed to the left)
+                const activeStartX = startX;
+                const activeEndX = startX + currentStride * (boxSize + 4) - 4;
+
+                ctx.save();
+                ctx.fillStyle = 'rgba(52, 211, 153, 0.1)'; // emerald tint
+                ctx.strokeStyle = '#34d399';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.roundRect(activeStartX - 4, smStartY - 4, (activeEndX - activeStartX) + 8, boxSize + 8, 4);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = '#34d399';
+                ctx.font = 'bold 11px Inter';
+                // Left-align to prevent horizontal overlap when the box gets narrow
+                ctx.textAlign = 'left';
+                ctx.fillText('✓ Active (Packed)', activeStartX, smStartY - 12);
+
+                // Inactive Region (Packed to the right)
+                if (currentStride < BLOCK_SIZE) {
+                    const inactiveStartX = startX + currentStride * (boxSize + 4);
+                    const inactiveEndX = startX + BLOCK_SIZE * (boxSize + 4) - 4;
+
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.1)'; // red tint
+                    ctx.strokeStyle = '#ef4444';
+                    ctx.beginPath();
+                    ctx.roundRect(inactiveStartX - 4, smStartY - 4, (inactiveEndX - inactiveStartX) + 8, boxSize + 8, 4);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#ef4444';
+                    // Right-align to push it away from the active label
+                    ctx.textAlign = 'right';
+                    ctx.fillText('✗ Idle (Warps Freed)', inactiveEndX, smStartY - 12);
+                }
+                ctx.restore();
+            }
+
+            // --- 3. Draw Tree Reduction (Phase 2) ---
+            if (p >= 5) {
+                // Background Watermark to emphasize the algorithmic difference
+                ctx.save();
+                ctx.fillStyle = 'rgba(56, 189, 248, 0.04)';
+                // Fixed pixel sizes prevent the text from scaling too wildly on ultrawide screens
+                ctx.font = 'bold 42px Inter';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                // Moved lower on the canvas to avoid overlapping with the tree nodes
+                ctx.fillText("SHRINKING STRIDE", w / 2, treeStartY + 140);
+
+                // Add a subtle directional arrow to the watermark
+                ctx.font = 'bold 16px Inter';
+                ctx.fillText("← FOLDS RIGHT TO LEFT ←", w / 2, treeStartY + 175);
+                ctx.restore();
+
+                // Steps mapping to strid: 5->4, 6->2, 7->1, 8->done
+                const maxD = Math.min(p - 4, 3); // how many tree layers to draw
+
+                for (let d = 1; d <= maxD; d++) {
+                    const stride = BLOCK_SIZE / Math.pow(2, d);
+                    const y = treeStartY + (d - 1) * treeLayerGap;
+
+                    for (let tid = 0; tid < stride; tid++) {
+                        const targetX = startX + tid * (boxSize + 4) + boxSize / 2;
+                        const sourceRightX = startX + (tid + stride) * (boxSize + 4) + boxSize / 2;
+
+                        // We draw lines originating from the previous level (or shared mem)
+                        const prevY = d === 1 ? smStartY + boxSize : y - treeLayerGap + boxSize;
+
+                        let alpha = 1.0;
+                        if (hoveredThread !== null) {
+                            if (hoveredThread !== tid) alpha = 0.1;
+                        }
+
+                        // Left vertical edge (target staying in place)
+                        ctx.save();
+                        ctx.globalAlpha = alpha;
+                        ctx.beginPath();
+                        ctx.moveTo(targetX, prevY);
+                        ctx.lineTo(targetX, y);
+                        ctx.strokeStyle = threadColors[tid];
+                        ctx.lineWidth = hoveredThread === tid ? 3 : 1.5;
+                        if (hoveredThread === tid) { ctx.shadowColor = threadColors[tid]; ctx.shadowBlur = 10; }
+                        ctx.stroke();
+
+                        // Right diagonal edge (bringing data over)
+                        ctx.beginPath();
+                        ctx.moveTo(sourceRightX, prevY);
+                        ctx.lineTo(targetX, y);
+                        ctx.stroke();
+                        ctx.restore();
+
+                        // Draw resulting Node
+                        let bg = '#312e81'; let bc = '#6366f1'; let tc = '#ffffff'; let blur = null;
+                        if (hoveredThread !== null && hoveredThread !== tid) {
+                            bg = '#1e1b4b'; bc = '#312e81'; tc = '#4f46e5';
+                        } else if (hoveredThread === tid) {
+                            bg = threadColors[tid]; bc = '#ffffff'; blur = threadColors[tid];
+                        }
+
+                        // Final step highlight
+                        if (p >= 8 && d === 3 && tid === 0) {
+                            bg = '#065f46'; bc = '#34d399'; // Emerald highlight for final sum
+                            if (hoveredThread === 0) blur = '#34d399';
+                        }
+
+                        // Read correct historical value safely
+                        const targetHistoryLevel = d + 4;
+                        const val = (sharedHistory[targetHistoryLevel] && sharedHistory[targetHistoryLevel][tid] !== undefined)
+                            ? sharedHistory[targetHistoryLevel][tid] : 0;
+                        const text = showIndices ? `s[${tid}]` : val;
+
+                        drawBox(ctx, targetX - boxSize / 2, y, boxSize, val, text, bg, bc, tc, blur);
+                    }
+                }
+            }
+        }
+
+        /**
+         * UI Updates
+         */
+        function updateUI() {
+            const p = state.progress;
+            slider.value = p;
+
+            btnBack.disabled = p === 0;
+            btnNext.disabled = p >= state.maxSteps;
+
+            uiElements.progressText.textContent = `Step ${p} / ${state.maxSteps}`;
+
+            // Phase Badge styling
+            if (p === 0) {
+                uiElements.phaseBadge.textContent = "Initialization";
+                uiElements.phaseBadge.className = "absolute top-6 right-6 bg-slate-800 text-slate-300 border border-slate-500/50 px-4 py-2 rounded-full text-xs font-bold shadow-xl z-10 uppercase tracking-widest backdrop-blur-md transition-all duration-300";
+            } else if (p <= 4) {
+                uiElements.phaseBadge.textContent = "Phase 1: Global to Shared Accumulation";
+                uiElements.phaseBadge.className = "absolute top-6 right-6 bg-purple-900/80 text-purple-300 border border-purple-500/50 px-4 py-2 rounded-full text-xs font-bold shadow-xl shadow-purple-900/20 z-10 uppercase tracking-widest backdrop-blur-md transition-all duration-300";
+            } else if (p <= 7) {
+                uiElements.phaseBadge.textContent = "Phase 2: Tree Reduction";
+                uiElements.phaseBadge.className = "absolute top-6 right-6 bg-sky-900/80 text-sky-300 border border-sky-500/50 px-4 py-2 rounded-full text-xs font-bold shadow-xl shadow-sky-900/20 z-10 uppercase tracking-widest backdrop-blur-md transition-all duration-300";
+            } else {
+                uiElements.phaseBadge.textContent = "Complete: Output";
+                uiElements.phaseBadge.className = "absolute top-6 right-6 bg-emerald-900/80 text-emerald-300 border border-emerald-500/50 px-4 py-2 rounded-full text-xs font-bold shadow-xl shadow-emerald-900/20 z-10 uppercase tracking-widest backdrop-blur-md transition-all duration-300";
+            }
+
+            // Metrics Update
+            if (p === 0) {
+                uiElements.metricMem.textContent = "Local";
+                uiElements.metricContiguous.textContent = "N/A";
+                highlightCode(1, 4);
+            } else if (p >= 1 && p <= 4) {
+                uiElements.metricMem.textContent = "Global -> Shared";
+                uiElements.metricContiguous.textContent = "Yes (Coalesced)";
+                highlightCode(7, 10);
+            } else if (p >= 5 && p <= 7) {
+                uiElements.metricMem.textContent = "Shared Only";
+                uiElements.metricContiguous.textContent = "Yes (No Divergence)";
+                highlightCode(13, 18);
+            } else if (p === 8) {
+                uiElements.metricMem.textContent = "Shared -> Global";
+                uiElements.metricContiguous.textContent = "N/A";
+                highlightCode(20, 20);
+            }
+
+            updateExplanation(p);
+            updateThreadsStatus(p);
+        }
+
+        function highlightCode(startLine, endLine) {
+            uiElements.codeLines.forEach((line, index) => {
+                const lineNum = index + 1;
+                if (!line) return;
+                if (lineNum >= startLine && lineNum <= endLine) {
+                    line.classList.add('active');
+                } else {
+                    line.classList.remove('active');
+                }
+            });
+        }
+
+        function updateExplanation(step) {
+            let html = '';
+            if (step === 0) {
+                html = `<p><strong class="text-white">Initialization:</strong> The kernel allocates a small chunk of fast on-chip <code>__shared__</code> memory matching the block size (8 elements). Every thread initializes its slot to 0.</p>`;
+            } else if (step >= 1 && step <= 4) {
+                const j = step - 1;
+                html = `<p><strong class="text-purple-400">Phase 1 (Segment ${j}):</strong> Thread Coarsening.</p>
+                        <p class="mt-2 text-slate-300">Instead of pulling 1 element and immediately branching into a tree, each thread sequentially pulls 4 elements and accumulates them locally.</p>
+                        <p class="mt-2 text-emerald-400">✨ <strong class="text-white">Perfect Coalescing:</strong> Look at the active row in Global Memory! All threads read adjacent indices (e.g., [0]-[7]). This maxes out memory bandwidth efficiency.</p>`;
+            } else if (step >= 5 && step <= 7) {
+                const d = step - 4;
+                const stride = BLOCK_SIZE / Math.pow(2, d);
+                html = `<p><strong class="text-sky-400">Phase 2 (Stride ${stride}):</strong> Shared Memory Tree.</p>
+                        <p class="mt-2 text-slate-300">All data is now securely inside the L1-speed shared cache. We shrink the stride inwards (<code>stride /= 2</code>).</p>
+                        <p class="mt-2 text-emerald-400">✨ <strong class="text-white">Zero Divergence:</strong> Check the monitor below. The active threads are perfectly packed to the left (T0, T1...). Complete warps can do work while other warps exit entirely.</p>`;
+            } else if (step === 8) {
+                html = `<p><strong class="text-emerald-400">Output:</strong> The reduction is finished. The block's total sum safely resides in <code>sharedData[0]</code>.</p>
+                        <p class="mt-2 text-slate-300">Thread 0 performs one single write back to slow Global Memory (<code>partialSums</code>). This approach is massively faster than the naive version.</p>`;
+            }
+            uiElements.explanationBox.innerHTML = html;
+        }
+
+        function updateThreadsStatus(step) {
+            for (let tid = 0; tid < BLOCK_SIZE; tid++) {
+                const box = document.getElementById(`thread-${tid}`);
+                if (!box) continue;
+
+                box.className = 'flex-1 h-full rounded border flex flex-col items-center justify-center font-mono text-sm thread-box relative overflow-hidden';
+                box.style.backgroundColor = '';
+                box.style.borderColor = '';
+
+                if (step === 0 || step === 8) {
+                    // Only T0 active on step 8
+                    if (step === 8 && tid === 0) {
+                        const tColor = threadColors[0];
+                        box.classList.add('active');
+                        box.style.backgroundColor = tColor + '30';
+                        box.style.borderColor = tColor;
+                        box.innerHTML = `
+                            <span class="text-[10px] sm:text-xs z-10 font-bold" style="color:${tColor}">TID</span>
+                            <span class="font-bold text-white z-10 text-xs sm:text-sm">${tid}</span>
+                            <div class="absolute bottom-0 w-full h-1" style="background-color:${tColor}"></div>
+                        `;
+                    } else {
+                        box.classList.add('idle');
+                        box.innerHTML = `<span class="text-slate-400 text-[10px] sm:text-xs">TID</span><span class="font-bold text-slate-300 text-xs sm:text-sm">${tid}</span>`;
+                    }
+                } else {
+                    let isActive = true;
+                    // Phase 2 logic
+                    if (step >= 5) {
+                        const d = step - 4;
+                        const stride = BLOCK_SIZE / Math.pow(2, d);
+                        isActive = tid < stride;
+                    }
+
+                    if (isActive) {
+                        box.classList.add('active');
+                        const tColor = threadColors[tid];
+                        box.style.backgroundColor = tColor + '30'; // slightly higher opacity for clarity
+                        box.style.borderColor = tColor;
+
+                        box.innerHTML = `
+                            <span class="text-[10px] sm:text-xs z-10 font-bold" style="color:${tColor}">TID</span>
+                            <span class="font-bold text-white z-10 text-xs sm:text-sm">${tid}</span>
+                            <div class="absolute bottom-0 w-full h-1" style="background-color:${tColor}"></div>
+                        `;
+                    } else {
+                        box.classList.add('inactive');
+                        box.innerHTML = `
+                            <span class="text-red-300 text-[10px] sm:text-xs z-10 opacity-70">TID</span>
+                            <span class="font-bold text-white z-10 opacity-70 text-xs sm:text-sm">${tid}</span>
+                            <div class="absolute inset-0 bg-red-900/40 pattern-diagonal-lines sm"></div>
+                        `;
+                    }
+                }
+            }
+        }
+
+        /**
+         * Event Listeners
+         */
+        function stepForward() {
+            if (state.progress < state.maxSteps) {
+                state.progress++;
+                renderCanvas();
+                updateUI();
+            }
+        }
+        function stepBack() {
+            if (state.progress > 0) {
+                state.progress--;
+                renderCanvas();
+                updateUI();
+            }
+        }
+
+        btnNext.addEventListener('click', stepForward);
+        btnBack.addEventListener('click', stepBack);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight') stepForward();
+            if (e.key === 'ArrowLeft') stepBack();
+        });
+
+        btnReset.addEventListener('click', () => {
+            state.progress = 0;
+            renderCanvas();
+            updateUI();
+        });
+
+        slider.addEventListener('input', (e) => {
+            state.progress = parseInt(e.target.value);
+            renderCanvas();
+            updateUI();
+        });
+
+        btnToggleVal.addEventListener('click', () => {
+            showIndices = !showIndices;
+            btnToggleVal.innerHTML = showIndices ?
+                `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg><span>Show Values</span>` :
+                `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h10"/><path d="M9 4v16"/><path d="m3 9 3 3-3 3"/></svg><span>Show Indices</span>`;
+            renderCanvas();
+        });
+
+        threadsContainer.addEventListener('mouseover', (e) => {
+            const box = e.target.closest('.thread-box');
+            if (box && state.progress > 0 && state.progress < state.maxSteps) {
+                hoveredThread = parseInt(box.dataset.tid);
+                renderCanvas();
+            }
+        });
+
+        threadsContainer.addEventListener('mouseout', (e) => {
+            const box = e.target.closest('.thread-box');
+            if (box) {
+                hoveredThread = null;
+                renderCanvas();
+            }
+        });
+
+        window.addEventListener('resize', resizeCanvas);
+
+        // Bootstrap
+        initData();
+
+    </script>
+</body>
+
+</html>

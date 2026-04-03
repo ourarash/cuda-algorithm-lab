@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualizing Matrix Multiplication Modes</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #0f172a; }
+        canvas { touch-action: none; }
+        
+        /* Mode Toggle Buttons */
+        .mode-btn-active { background-color: #e2e8f0; color: #0f172a; border-color: #cbd5e1; font-weight: 600; }
+        .mode-btn-inactive { background-color: transparent; color: #64748b; border-color: transparent; font-weight: 500; }
+        
+        .code-font { font-family: 'Fira Code', monospace; }
+        
+        /* Custom scrollbar for code block */
+        .code-scroll::-webkit-scrollbar { height: 8px; }
+        .code-scroll::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 4px; }
+        .code-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col p-4 md:p-8 overflow-x-hidden bg-slate-50">
+
+    <div class="max-w-[1600px] mx-auto w-full flex-1 flex flex-col lg:flex-row gap-6">
+        <!-- Sidebar: Controls and Code -->
+        <div class="w-full lg:w-[360px] xl:w-[420px] flex flex-col gap-6 shrink-0">
+            <!-- Controls Panel -->
+            <div class="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 flex flex-col gap-6">
+                <div class="flex flex-col gap-4">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest">Simulation Engine</h2>
+                        <span id="title-mode" class="bg-purple-100 text-purple-700 px-3 py-1 rounded text-xs font-bold uppercase tracking-wider">Outer Product</span>
+                    </div>
+                    <div class="flex bg-slate-100 rounded-lg p-1 border border-slate-200">
+                        <button id="btn-mode-outer" class="mode-btn-active flex-1 px-2 py-1.5 rounded-md text-xs font-bold transition-all">Outer Product</button>
+                        <button id="btn-mode-dot" class="mode-btn-inactive flex-1 px-2 py-1.5 rounded-md text-xs font-bold transition-all hover:bg-slate-200">Dot Product</button>
+                    </div>
+
+                    <!-- Inner Loop Toggle (Only visible in Outer Product Mode) -->
+                    <div id="loop-order-container" class="flex flex-col gap-2 mt-2">
+                        <div class="flex justify-between items-center text-xs font-bold text-slate-400 uppercase tracking-wider">
+                            <span>Inner Loop Order</span>
+                        </div>
+                        <div class="flex bg-slate-100 rounded-lg p-1 border border-slate-200">
+                            <button id="btn-order-ij" class="mode-btn-active flex-1 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all">i, j (Row-first)</button>
+                            <button id="btn-order-ji" class="mode-btn-inactive flex-1 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all hover:bg-slate-200">j, i (Col-first)</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <button id="btn-play" class="flex-1 h-12 flex items-center justify-center gap-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-md shadow-blue-500/20 transition-all text-lg" title="Play/Pause">
+                        <i class="fas fa-play" id="play-icon"></i> <span id="play-text">Play</span>
+                    </button>
+                    <button id="btn-reset" class="w-12 h-12 flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 transition-colors" title="Reset">
+                        <i class="fas fa-undo"></i>
+                    </button>
+                    <div class="flex bg-slate-100 rounded-lg border border-slate-200 overflow-hidden">
+                        <button id="btn-prev" class="w-10 h-12 flex items-center justify-center hover:bg-slate-200 text-slate-600 transition-colors border-r border-slate-200" title="Step Backward">
+                            <i class="fas fa-step-backward"></i>
+                        </button>
+                        <button id="btn-next" class="w-14 h-12 flex items-center justify-center hover:bg-slate-200 text-slate-800 font-bold transition-colors" title="Step Forward">
+                            Step
+                        </button>
+                    </div>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                    <div class="flex justify-between items-center text-xs font-bold text-slate-400 uppercase tracking-wider">
+                        <span>Animation Speed</span>
+                    </div>
+                    <input type="range" id="speed-slider" min="0.5" max="3.0" step="0.1" value="1.5" class="w-full accent-blue-600 cursor-pointer">
+                </div>
+                
+                <div class="pt-4 border-t border-slate-100 flex justify-between items-center">
+                    <span class="text-sm font-bold text-slate-700">Current Step:</span>
+                    <span id="step-indicator" class="text-sm font-mono font-bold bg-slate-100 px-3 py-1 rounded border border-slate-200">1</span>
+                </div>
+            </div>
+
+            <!-- CPU Code View -->
+            <div class="bg-[#1e1e24] rounded-2xl shadow-xl border border-slate-800 flex flex-col flex-1 min-h-[300px]">
+                <div class="bg-[#2a2a35] px-4 py-3 border-b border-slate-700 rounded-t-2xl">
+                    <h2 class="font-semibold text-slate-200 text-sm tracking-wide flex items-center gap-2">
+                        <i class="fas fa-code text-pink-400"></i> Sequential CPU Code
+                    </h2>
+                </div>
+                <div class="p-5 text-[13px] code-font leading-relaxed overflow-y-auto code-scroll text-slate-300 h-full" id="code-container">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Area: Canvas and Explanation -->
+        <div class="flex-1 flex flex-col gap-6 min-w-0">
+            <!-- Canvas Container -->
+            <div class="relative w-full aspect-[4/3] lg:aspect-auto lg:flex-1 bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm flex items-center justify-center p-4">
+                <canvas id="vizCanvas" width="800" height="600" class="max-w-full max-h-full w-auto h-auto object-contain"></canvas>
+            </div>
+
+            <!-- Explanations -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Dynamic Math Explanation -->
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col overflow-hidden">
+                    <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 flex items-center gap-2">
+                        <i class="fas fa-chalkboard-teacher text-blue-500"></i>
+                        <h2 class="font-semibold text-slate-800">What's Happening</h2>
+                    </div>
+                    <div class="p-6 text-slate-700 text-[1.05rem] leading-relaxed flex items-center h-full" id="explanation-text">
+                        Press Play or Step Forward.
+                    </div>
+                </div>
+
+                <!-- Conceptual Breakdown -->
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col overflow-hidden">
+                    <div class="bg-slate-50 px-4 py-3 border-b border-slate-200">
+                        <h2 class="font-semibold text-slate-800">The Core Difference</h2>
+                    </div>
+                    <div class="p-6 text-sm text-slate-600 space-y-4" id="concept-text">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Core Configuration & Data ---
+        const TM = 4; // Rows
+        const TN = 4; // Cols
+        const BK = 4; // Common dimension
+        
+        const A_mat = [
+            [1, 2, 3, 1],
+            [2, 1, 1, 2],
+            [3, 0, 2, 1],
+            [1, 1, 0, 3]
+        ];
+        
+        const B_mat = [
+            [2, 1, 0, 3],
+            [1, 2, 2, 1],
+            [0, 3, 1, 2],
+            [2, 0, 1, 1]
+        ];
+
+        let C_mat = Array(TM).fill().map(() => Array(TN).fill(0));
+        let temp_scalar = 0;
+
+        // --- State Machine & Modes ---
+        const MODES = { OUTER: 'OUTER', DOT: 'DOT' };
+        let currentMode = MODES.OUTER;
+        let loopOrder = 'ij'; // 'ij' or 'ji'
+
+        const STATES = {
+            IDLE: 0,
+            PULL_VECTORS: 1,
+            CALC_MATH: 2,   // Dot Mode
+            ACCUMULATE: 3,  // Dot Mode
+            DONE: 4,
+            INNER_LOOP: 5   // Outer Mode (Iterating i & j)
+        };
+
+        let state = STATES.IDLE;
+        
+        // Dot Mode Progress
+        let step_idx = 0; 
+        
+        // Outer Mode Progress (Nested Loops)
+        let outer_k = 0;
+        let outer_i = 0;
+        let outer_j = 0;
+
+        let progress = 0; 
+        let isPlaying = false;
+        let speedMult = 1.2;
+        let lastTime = 0;
+
+        // UI Elements
+        const btnPlay = document.getElementById('btn-play');
+        const iconPlay = document.getElementById('play-icon');
+        const textPlay = document.getElementById('play-text');
+        const sliderSpeed = document.getElementById('speed-slider');
+        const explanationText = document.getElementById('explanation-text');
+        const conceptText = document.getElementById('concept-text');
+        const stepIndicator = document.getElementById('step-indicator');
+        const titleMode = document.getElementById('title-mode');
+
+        const btnModeOuter = document.getElementById('btn-mode-outer');
+        const btnModeDot = document.getElementById('btn-mode-dot');
+        const btnOrderIj = document.getElementById('btn-order-ij');
+        const btnOrderJi = document.getElementById('btn-order-ji');
+        const loopOrderContainer = document.getElementById('loop-order-container');
+
+        // --- Canvas & Rendering Setup ---
+        const canvas = document.getElementById('vizCanvas');
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = 800 * dpr;
+        canvas.height = 600 * dpr;
+        ctx.scale(dpr, dpr);
+        canvas.style.width = '100%';
+
+        const cw = 45, ch = 45, pad = 6;
+        const posA = { x: 30, y: 30 }; 
+        const posB = { x: 350, y: 30 }; 
+        const gridX = 400, gridY = 350;
+        
+        // Outer Product Layout
+        const posRegM = { x: gridX - cw - pad*3, y: gridY }; 
+        const posRegN = { x: gridX, y: gridY - ch - pad*3 }; 
+        const posC = { x: gridX, y: gridY };
+
+        // Colors
+        const colors = {
+            A: { base: '#fee2e2', border: '#fca5a5', text: '#991b1b', highlight: '#ef4444' }, // Light red/pink
+            B: { base: '#dcfce7', border: '#86efac', text: '#166534', highlight: '#22c55e' }, // Light green
+            RegM: { base: '#fee2e2', border: '#db2777', text: '#be185d' }, // Bright Pink border
+            RegN: { base: '#eff6ff', border: '#7c3aed', text: '#5b21b6' }, // Purple border
+            C: { base: '#e0f2fe', border: '#7dd3fc', text: '#075985', highlight: '#3b82f6' }, // Light blue
+            Temp: { base: '#fef3c7', border: '#f59e0b', text: '#b45309' }, // Amber/Yellow for active math
+            Line: 'rgba(148, 163, 184, 0.6)', // Slate-400
+        };
+
+        // --- Code Strings ---
+        const getCodeOuterStr = () => {
+            if (loopOrder === 'ij') {
+                return `
+<span class="text-emerald-400">// Outer Product (Row-first traversal)</span>
+<div id="hl-outer-k" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200"><span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> k = 0; k < K; ++k) {</div>
+<div id="hl-outer-i" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">  <span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> i = 0; i < M; ++i) {</div>
+<div id="hl-outer-j" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">    <span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> j = 0; j < N; ++j) {</div>
+<div id="hl-outer-math" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">      <span class="text-emerald-400">// Compute element and accumulate</span>
+      C[i][j] += A[i][k] * B[k][j];</div>
+<div class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent">    }
+  }
+}</div>`;
+            } else {
+                return `
+<span class="text-emerald-400">// Outer Product (Col-first traversal)</span>
+<div id="hl-outer-k" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200"><span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> k = 0; k < K; ++k) {</div>
+<div id="hl-outer-j" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">  <span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> j = 0; j < N; ++j) {</div>
+<div id="hl-outer-i" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">    <span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> i = 0; i < M; ++i) {</div>
+<div id="hl-outer-math" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">      <span class="text-emerald-400">// Compute element and accumulate</span>
+      C[i][j] += A[i][k] * B[k][j];</div>
+<div class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent">    }
+  }
+}</div>`;
+            }
+        };
+
+        const codeDotStr = `
+<span class="text-emerald-400">// Dot Product (Standard Loop Order)</span>
+<div id="hl-dot-cell" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200"><span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> i = 0; i < M; ++i) {
+  <span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> j = 0; j < N; ++j) {
+    <span class="text-blue-400">float</span> sum = <span class="text-yellow-300">0.0f</span>;</div>
+<div id="hl-dot-math" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">    <span class="text-pink-400">for</span> (<span class="text-blue-400">int</span> k = 0; k < K; ++k) {
+      <span class="text-emerald-400">// Computes one single output cell</span>
+      sum += A[i][k] * B[k][j];
+    }</div>
+<div id="hl-dot-accum" class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent transition-colors duration-200">    C[i][j] = sum;</div>
+<div class="py-0.5 -ml-5 pl-[17px] border-l-[3px] border-transparent">  }
+}</div>`;
+
+        // --- Text Updates ---
+        const updateConceptText = () => {
+            const codeContainer = document.getElementById('code-container');
+            if (currentMode === MODES.OUTER) {
+                codeContainer.innerHTML = `<pre><code>${getCodeOuterStr()}</code></pre>`;
+                let travOrderText = loopOrder === 'ij' ? 'row by row (i then j)' : 'column by column (j then i)';
+                conceptText.innerHTML = `
+                    <p>In <strong>Outer Product</strong> mode, we lock in a <span class="text-red-600 font-bold">Column from A</span> and a <span class="text-green-600 font-bold">Row from B</span> for the outer loop.</p>
+                    <p>Then, the inner loops systematically iterate over every combination of those vectors, expanding their products into the <strong>4x4 Grid</strong> <span class="text-blue-600 font-bold">${travOrderText}</span>.</p>
+                    <p class="text-purple-600 font-bold mt-2">Notice how memory accesses to A and B are reused efficiently across the inner iterations!</p>
+                `;
+            } else {
+                codeContainer.innerHTML = `<pre><code>${codeDotStr}</code></pre>`;
+                conceptText.innerHTML = `
+                    <p>In <strong>Dot Product</strong> mode (the standard way), we take a <span class="text-red-600 font-bold">Row from A</span> and a <span class="text-green-600 font-bold">Column from B</span>.</p>
+                    <p>We match up their pairs, multiply them, and sum them together to find exactly <strong>ONE</strong> cell in the output matrix.</p>
+                `;
+            }
+        };
+
+        function updateText() {
+            let totalSteps;
+            let currStep;
+            
+            if (currentMode === MODES.OUTER) {
+                totalSteps = BK * (TM * TN + 1);
+                if (state === STATES.IDLE) currStep = 0;
+                else if (state === STATES.DONE) currStep = totalSteps;
+                else {
+                    if (loopOrder === 'ij') {
+                        currStep = outer_k * (TM * TN + 1) + (state === STATES.PULL_VECTORS ? 0 : 1 + outer_i * TN + outer_j);
+                    } else {
+                        currStep = outer_k * (TM * TN + 1) + (state === STATES.PULL_VECTORS ? 0 : 1 + outer_j * TM + outer_i);
+                    }
+                }
+            } else {
+                totalSteps = TM * TN;
+                currStep = step_idx;
+            }
+
+            stepIndicator.innerText = `${Math.min(currStep + 1, totalSteps)} / ${totalSteps}`;
+
+            if (state === STATES.DONE || currStep >= totalSteps) {
+                explanationText.innerHTML = `<span class="text-emerald-600 font-bold">Done!</span> Matrix multiplication complete.`;
+                updateCodeHighlight();
+                return;
+            }
+
+            if (currentMode === MODES.OUTER) {
+                switch(state) {
+                    case STATES.IDLE: explanationText.innerHTML = "Ready. Press Play."; break;
+                    case STATES.PULL_VECTORS: explanationText.innerHTML = `Extracting <span class="text-red-600 font-bold">Column ${outer_k}</span> of A, and <span class="text-green-600 font-bold">Row ${outer_k}</span> of B.`; break;
+                    case STATES.INNER_LOOP: explanationText.innerHTML = `<strong>Nested Loops:</strong>&nbsp; Multiplying Column Item [${outer_i}] (<span class="text-red-600 font-bold">${A_mat[outer_i][outer_k]}</span>) by Row Item [${outer_j}] (<span class="text-green-600 font-bold">${B_mat[outer_k][outer_j]}</span>) to accumulate into&nbsp;<span class="text-blue-600 font-bold">C[${outer_i}][${outer_j}]</span>.`; break;
+                }
+            } else {
+                let r = Math.floor(step_idx / TN);
+                let c = step_idx % TN;
+                switch(state) {
+                    case STATES.IDLE: explanationText.innerHTML = "Ready. Press Play."; break;
+                    case STATES.PULL_VECTORS: explanationText.innerHTML = `Calculating cell [${r+1}, ${c+1}]. Extracting <span class="text-red-600 font-bold">Row ${r+1}</span> from A, and <span class="text-green-600 font-bold">Column ${c+1}</span> from B.`; break;
+                    case STATES.CALC_MATH: explanationText.innerHTML = `<strong>Dot Product:</strong>&nbsp; Pairwise multiply the elements, then sum them together to get ONE scalar number.`; break;
+                    case STATES.ACCUMULATE: explanationText.innerHTML = `Placing that single calculated scalar into Cell [${r+1}, ${c+1}] of Output Matrix C.`; break;
+                }
+            }
+            
+            updateCodeHighlight();
+        }
+        
+        function updateCodeHighlight() {
+            // Reset all highlights
+            document.querySelectorAll('[id^="hl-"]').forEach(el => {
+                el.classList.remove('bg-blue-500/20', 'border-blue-400');
+                el.classList.add('border-transparent');
+            });
+
+            if (state === STATES.IDLE || state === STATES.DONE) return;
+
+            let activeIds = [];
+            if (currentMode === MODES.OUTER) {
+                if (state === STATES.PULL_VECTORS) activeIds = ['hl-outer-k'];
+                else if (state === STATES.INNER_LOOP) activeIds = ['hl-outer-k', 'hl-outer-i', 'hl-outer-j', 'hl-outer-math'];
+            } else {
+                if (state === STATES.PULL_VECTORS) activeIds = ['hl-dot-cell'];
+                else if (state === STATES.CALC_MATH) activeIds = ['hl-dot-math'];
+                else if (state === STATES.ACCUMULATE) activeIds = ['hl-dot-accum'];
+            }
+
+            activeIds.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.classList.remove('border-transparent');
+                    el.classList.add('bg-blue-500/20', 'border-blue-400');
+                }
+            });
+        }
+
+        // --- UI Interactions ---
+        function switchMode(newMode) {
+            if (currentMode === newMode) return;
+            currentMode = newMode;
+            
+            if (newMode === MODES.OUTER) {
+                btnModeOuter.className = 'mode-btn-active flex-1 px-2 py-1.5 rounded-md text-xs font-bold transition-all';
+                btnModeDot.className = 'mode-btn-inactive flex-1 px-2 py-1.5 rounded-md text-xs font-bold transition-all hover:bg-slate-200';
+                titleMode.innerHTML = `Outer Product`;
+                titleMode.className = "bg-purple-100 text-purple-700 px-3 py-1 rounded text-xs font-bold uppercase tracking-wider";
+                loopOrderContainer.style.display = 'flex';
+                speedMult = 1.2;
+                sliderSpeed.value = 1.2;
+            } else {
+                btnModeDot.className = 'mode-btn-active flex-1 px-2 py-1.5 rounded-md text-xs font-bold transition-all';
+                btnModeOuter.className = 'mode-btn-inactive flex-1 px-2 py-1.5 rounded-md text-xs font-bold transition-all hover:bg-slate-200';
+                titleMode.innerHTML = `Dot Product`;
+                titleMode.className = "bg-blue-100 text-blue-700 px-3 py-1 rounded text-xs font-bold uppercase tracking-wider";
+                loopOrderContainer.style.display = 'none';
+                speedMult = 2.0; 
+                sliderSpeed.value = 2.0;
+            }
+            
+            updateConceptText();
+            resetViz();
+        }
+
+        btnModeOuter.addEventListener('click', () => switchMode(MODES.OUTER));
+        btnModeDot.addEventListener('click', () => switchMode(MODES.DOT));
+
+        btnOrderIj.addEventListener('click', () => {
+            if (loopOrder === 'ij') return;
+            loopOrder = 'ij';
+            btnOrderIj.className = 'mode-btn-active flex-1 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all';
+            btnOrderJi.className = 'mode-btn-inactive flex-1 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all hover:bg-slate-200';
+            updateConceptText();
+            resetViz();
+        });
+
+        btnOrderJi.addEventListener('click', () => {
+            if (loopOrder === 'ji') return;
+            loopOrder = 'ji';
+            btnOrderJi.className = 'mode-btn-active flex-1 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all';
+            btnOrderIj.className = 'mode-btn-inactive flex-1 px-2 py-1.5 rounded-md text-[11px] font-bold transition-all hover:bg-slate-200';
+            updateConceptText();
+            resetViz();
+        });
+
+        // --- Helper Rendering ---
+        function roundRect(x, y, w, h, radius, fill, stroke, strokeWidth=2) {
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y); ctx.lineTo(x + w - radius, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + radius); ctx.lineTo(x + w, y + h - radius);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h); ctx.lineTo(x + radius, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - radius); ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y); ctx.closePath();
+            if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+            if (stroke) { ctx.lineWidth = strokeWidth; ctx.strokeStyle = stroke; ctx.stroke(); }
+        }
+
+        function drawCell(x, y, val, colorObj, alpha=1.0, isHighlight=false) {
+            ctx.globalAlpha = alpha;
+            if (isHighlight) { ctx.shadowColor = colorObj.border; ctx.shadowBlur = 8; } 
+            else { ctx.shadowBlur = 0; }
+            
+            roundRect(x, y, cw, ch, 6, colorObj.base, isHighlight ? (colorObj.highlight || colorObj.border) : colorObj.border, isHighlight ? 3 : 1);
+            ctx.shadowBlur = 0; 
+            
+            if (val !== null && val !== undefined) {
+                ctx.fillStyle = colorObj.text; 
+                ctx.font = (isHighlight ? 'bold ' : '500 ') + '18px Inter'; 
+                ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.fillText(val, x + cw/2, y + ch/2 + 1);
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        function drawGrid(startX, startY, rows, cols, data, colorObj, alpha=1.0, hlCol=-1, hlRow=-1) {
+            for (let i = 0; i < rows; i++) {
+                for (let j = 0; j < cols; j++) {
+                    const x = startX + j * (cw + pad); const y = startY + i * (ch + pad);
+                    const isHL = (j === hlCol || i === hlRow);
+                    drawCell(x, y, data[i][j], colorObj, isHL ? 1.0 : alpha, isHL);
+                }
+            }
+        }
+
+        function drawLabel(x, y, text, align='center', color='#64748b', font='600 14px Inter') {
+            ctx.fillStyle = color; ctx.font = font; ctx.textAlign = align; ctx.fillText(text, x, y);
+        }
+
+        function drawStatsBox(loads, ops) {
+            let sx = canvas.width/dpr - 230;
+            let sy = 20;
+            roundRect(sx, sy, 210, 115, 8, 'rgba(255, 255, 255, 0.95)', '#cbd5e1', 2);
+            
+            drawLabel(sx + 105, sy + 22, "PERFORMANCE STATS", 'center', '#475569', 'bold 12px Inter');
+            ctx.beginPath(); ctx.moveTo(sx + 15, sy + 32); ctx.lineTo(sx + 195, sy + 32);
+            ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1; ctx.stroke();
+            
+            drawLabel(sx + 15, sy + 52, "Memory Loads:", 'left', '#64748b', '13px Inter');
+            drawLabel(sx + 195, sy + 52, loads.toString(), 'right', '#ef4444', 'bold 15px Fira Code');
+            
+            drawLabel(sx + 15, sy + 77, "Math Ops (FMA):", 'left', '#64748b', '13px Inter');
+            drawLabel(sx + 195, sy + 77, ops.toString(), 'right', '#3b82f6', 'bold 15px Fira Code');
+            
+            let ratio = loads > 0 ? (ops / loads).toFixed(2) : "0.00";
+            drawLabel(sx + 15, sy + 102, "Ops per Load:", 'left', '#334155', 'bold 13px Inter');
+            drawLabel(sx + 195, sy + 102, ratio, 'right', '#10b981', 'bold 15px Fira Code');
+        }
+
+        function easeOutExpo(x) { return x === 1 ? 1 : 1 - Math.pow(2, -10 * x); }
+        function easeInOutQuad(x) { return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2; }
+
+        // --- Render Loop ---
+        function render(timestamp) {
+            if (!lastTime) lastTime = timestamp;
+            const dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            let isDone = (currentMode === MODES.OUTER) ? (state === STATES.DONE) : (step_idx >= (TM * TN));
+
+            // Calculate Performance Stats
+            let totalLoads = 0, totalOps = 0;
+            if (currentMode === MODES.OUTER) {
+                totalLoads = (state === STATES.DONE) ? 32 : (outer_k * 8) + ((state === STATES.PULL_VECTORS) ? Math.floor(progress * 8) : (state !== STATES.IDLE ? 8 : 0));
+                let innerCount = (loopOrder === 'ij' ? outer_i * TN + outer_j : outer_j * TM + outer_i);
+                totalOps = (state === STATES.DONE) ? 64 : (outer_k * 16) + ((state === STATES.INNER_LOOP) ? (innerCount + (progress >= 0.5 ? 1 : 0)) : 0);
+            } else {
+                totalLoads = (state === STATES.DONE) ? 128 : (step_idx * 8) + ((state === STATES.PULL_VECTORS) ? Math.floor(progress * 8) : (state !== STATES.IDLE ? 8 : 0));
+                totalOps = (state === STATES.DONE) ? 64 : (step_idx * 4) + ((state === STATES.CALC_MATH) ? Math.floor(progress * 4) : (state === STATES.ACCUMULATE ? 4 : 0));
+            }
+
+            if (isPlaying && !isDone) {
+                let duration = 1200 / speedMult; 
+                if (state === STATES.CALC_MATH) duration = 2000 / speedMult; 
+                if (state === STATES.INNER_LOOP) duration = 600 / speedMult; // Faster per cell for sequential outer
+                
+                progress += dt / duration;
+                if (progress >= 1.0) { progress = 0; advanceState(); }
+            }
+
+            ctx.clearRect(0, 0, canvas.width/dpr, canvas.height/dpr);
+
+            // Determine Highlights for A and B
+            let hlACol = -1, hlARow = -1, hlBCol = -1, hlBRow = -1;
+            let fadeSrc = (state === STATES.CALC_MATH || state === STATES.ACCUMULATE || state === STATES.INNER_LOOP) ? 0.3 : 1.0;
+
+            if (state !== STATES.IDLE && state !== STATES.DONE) {
+                if (currentMode === MODES.OUTER) {
+                    hlACol = outer_k; hlBRow = outer_k;
+                } else {
+                    hlARow = Math.floor(step_idx / TN); hlBCol = step_idx % TN;
+                }
+            }
+
+            // Source Matrices
+            drawGrid(posA.x, posA.y, TM, BK, A_mat, colors.A, fadeSrc, hlACol, hlARow);
+            drawLabel(posA.x + (BK*(cw+pad))/2, posA.y - 10, "Matrix A");
+
+            drawGrid(posB.x, posB.y, BK, TN, B_mat, colors.B, fadeSrc, hlBCol, hlBRow);
+            drawLabel(posB.x + (TN*(cw+pad))/2, posB.y - 10, "Matrix B");
+
+            // Base Output Matrix
+            drawGrid(posC.x, posC.y, TM, TN, C_mat, colors.C, 1.0, -1, -1);
+            if (currentMode === MODES.DOT && state !== STATES.IDLE && step_idx < (TM*TN)) {
+                let r = Math.floor(step_idx / TN);
+                let c = step_idx % TN;
+                drawCell(posC.x + c * (cw + pad), posC.y + r * (ch + pad), C_mat[r][c], colors.C, 1.0, true);
+            }
+            drawLabel(posC.x + (TN*(cw+pad))/2, posC.y + TM*(ch+pad) + 20, "Output Matrix (C)");
+
+            if (isDone) return;
+
+            const smoothProg = easeInOutQuad(progress);
+
+            // --- OUTER PRODUCT LOOP ANIMATION ---
+            if (currentMode === MODES.OUTER) {
+                let k = outer_k;
+                if (state === STATES.PULL_VECTORS) {
+                    for (let i = 0; i < TM; i++) {
+                        let sx = posA.x + k * (cw + pad), sy = posA.y + i * (ch + pad);
+                        let tx = posRegM.x, ty = posRegM.y + i * (ch + pad);
+                        drawCell(sx + (tx - sx) * smoothProg, sy + (ty - sy) * smoothProg, A_mat[i][k], colors.RegM, 1.0, true);
+                    }
+                    for (let j = 0; j < TN; j++) {
+                        let sx = posB.x + j * (cw + pad), sy = posB.y + k * (ch + pad);
+                        let tx = posRegN.x + j * (cw + pad), ty = posRegN.y;
+                        drawCell(sx + (tx - sx) * smoothProg, sy + (ty - sy) * smoothProg, B_mat[k][j], colors.RegN, 1.0, true);
+                    }
+                    drawLabel(posRegM.x + cw/2, posRegM.y - 15, "Loading 4 items...", 'center', '#ef4444', '600 12px Inter');
+                    drawLabel(posRegN.x - 15, posRegN.y + ch/2 + 2, "Loading 4 items...", 'right', '#ef4444', '600 12px Inter');
+                } 
+                else if (state === STATES.INNER_LOOP) {
+                    let i = outer_i, j = outer_j;
+
+                    // Draw static Vectors, Highlighting ONLY current i and j being calculated
+                    for (let r = 0; r < TM; r++) drawCell(posRegM.x, posRegM.y + r * (ch + pad), A_mat[r][k], colors.RegM, 1.0, r === i);
+                    for (let c = 0; c < TN; c++) drawCell(posRegN.x + c * (cw + pad), posRegN.y, B_mat[k][c], colors.RegN, 1.0, c === j);
+                    drawLabel(posRegM.x + cw/2, posRegM.y - 15, "Column"); drawLabel(posRegN.x - 40, posRegN.y + ch/2 + 5, "Row");
+
+                    // Emphasize Memory Reuse with Glowing Pill Badges
+                    let pulseAlpha = 0.5 + 0.5 * Math.sin(timestamp / 150);
+                    ctx.globalAlpha = pulseAlpha;
+                    
+                    // Column Reuse Badge
+                    let badgeMx = posRegM.x + cw/2 - 45;
+                    let badgeMy = posRegM.y - 42;
+                    roundRect(badgeMx, badgeMy, 90, 20, 10, '#dcfce7', '#22c55e', 1);
+                    drawLabel(badgeMx + 45, badgeMy + 14, "⚡ REUSED", 'center', '#166534', 'bold 11px Inter');
+
+                    // Row Reuse Badge
+                    let badgeNx = posRegN.x - 90;
+                    let badgeNy = posRegN.y + ch/2 - 25;
+                    roundRect(badgeNx, badgeNy, 80, 20, 10, '#dcfce7', '#22c55e', 1);
+                    drawLabel(badgeNx + 40, badgeNy + 14, "⚡ REUSED", 'center', '#166534', 'bold 11px Inter');
+                    
+                    ctx.globalAlpha = 1.0;
+
+                    let cx = posC.x + j * (cw + pad);
+                    let cy = posC.y + i * (ch + pad);
+                    let startVal = C_mat[i][j], addVal = A_mat[i][k] * B_mat[k][j];
+
+                    if (progress < 0.5) {
+                        // Phase 1: Draw Intersecting lines pointing to cell [i, j]
+                        let p = progress * 2;
+                        ctx.strokeStyle = colors.Line; ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
+                        ctx.beginPath();
+                        
+                        let regMx = posRegM.x + cw, regMy = posRegM.y + i * (ch + pad) + ch/2;
+                        ctx.moveTo(regMx, regMy); ctx.lineTo(regMx + (cx - regMx) * p, regMy);
+                        
+                        let regNx = posRegN.x + j * (cw + pad) + cw/2, regNy = posRegN.y + ch;
+                        ctx.moveTo(regNx, regNy); ctx.lineTo(regNx, regNy + (cy - regNy) * p);
+                        
+                        ctx.stroke(); ctx.setLineDash([]);
+
+                        // Show amber/yellow calculated temporary scalar
+                        if (p > 0.8) {
+                            drawCell(cx, cy, addVal, colors.Temp, (p - 0.8) * 5, true);
+                        }
+                    } else {
+                        // Phase 2: Accumulate temporary yellow value into final C matrix cell
+                        let p = (progress - 0.5) * 2;
+                        let pop = Math.sin(p * Math.PI);
+                        if (pop > 0) {
+                            ctx.globalAlpha = pop * 0.6; roundRect(cx-2, cy-2, cw+4, ch+4, 8, '#3b82f6', null, 0); ctx.globalAlpha = 1.0;
+                        }
+                        drawCell(cx, cy, startVal + addVal, colors.C, 1.0, true);
+                    }
+                }
+            } 
+            // --- DOT PRODUCT ANIMATION ---
+            else {
+                let r = Math.floor(step_idx / TN);
+                let c = step_idx % TN;
+                let eqX = posC.x + (TN*(cw+pad))/2;
+                let eqY = posC.y - 40;
+
+                if (state === STATES.CALC_MATH || state === STATES.ACCUMULATE) {
+                    if (state === STATES.CALC_MATH) {
+                        temp_scalar = 0;
+                        for(let k=0; k<BK; k++) temp_scalar += A_mat[r][k] * B_mat[k][c];
+
+                        if (progress < 0.5) {
+                            let pairProg = progress * 2;
+                            ctx.strokeStyle = colors.Line; ctx.lineWidth = 2; ctx.setLineDash([4, 4]);
+                            ctx.beginPath();
+                            for(let k=0; k<BK; k++) {
+                                let ax = posA.x + k*(cw+pad) + cw/2, ay = posA.y + r*(ch+pad) + ch/2;
+                                let bx = posB.x + c*(cw+pad) + cw/2, by = posB.y + k*(ch+pad) + ch/2;
+                                ctx.moveTo(ax, ay); ctx.lineTo(ax + (eqX - ax)*pairProg, ay + (eqY - ay)*pairProg);
+                                ctx.moveTo(bx, by); ctx.lineTo(bx + (eqX - bx)*pairProg, by + (eqY - by)*pairProg);
+                            }
+                            ctx.stroke(); ctx.setLineDash([]);
+                            
+                            let sumStr = "";
+                            for(let k=0; k<BK; k++) sumStr += `(${A_mat[r][k]}×${B_mat[k][c]})` + (k < BK-1 ? " + " : "");
+                            drawLabel(eqX, eqY + 10, sumStr, 'center', colors.Temp.text, 'bold 15px Inter');
+                        } else {
+                            let sumProg = (progress - 0.5) * 2;
+                            let sumStr = "";
+                            for(let k=0; k<BK; k++) sumStr += `${A_mat[r][k] * B_mat[k][c]}` + (k < BK-1 ? " + " : "");
+                            drawLabel(eqX - 25, eqY + 10, sumStr + " = ", 'center', '#64748b', 'bold 15px Inter');
+                            
+                            if (sumProg > 0.1) {
+                                drawCell(eqX + 70, eqY - ch/2 + 10, temp_scalar, colors.Temp, Math.min(1, (sumProg-0.1)*2), true);
+                            }
+                        }
+                    } else if (state === STATES.ACCUMULATE) {
+                        let sx = eqX + 70, sy = eqY - ch/2 + 10;
+                        let tx = posC.x + c * (cw + pad), ty = posC.y + r * (ch + pad);
+                        
+                        let eProg = easeOutExpo(progress);
+                        let cx = sx + (tx - sx) * eProg;
+                        let cy = sy + (ty - sy) * eProg;
+                        
+                        if (progress < 0.9) {
+                            drawCell(cx, cy, temp_scalar, colors.Temp, 1-progress, true);
+                        } else {
+                            let pop = Math.sin((progress - 0.9) * 10 * Math.PI);
+                            if (pop > 0) {
+                                ctx.globalAlpha = pop * 0.8; roundRect(tx-2, ty-2, cw+4, ch+4, 8, '#3b82f6', null, 0); ctx.globalAlpha = 1.0;
+                            }
+                            drawCell(tx, ty, C_mat[r][c] + temp_scalar, colors.C, 1.0, true);
+                        }
+                    }
+                }
+            }
+
+            drawStatsBox(totalLoads, totalOps);
+            if (isPlaying) requestAnimationFrame(render);
+        }
+
+        // --- Logic Flow ---
+        function advanceState() {
+            if (state === STATES.DONE) { togglePlayUI(false); updateText(); return; }
+
+            if (currentMode === MODES.OUTER) {
+                if (state === STATES.IDLE) {
+                    state = STATES.PULL_VECTORS; outer_k = 0;
+                } else if (state === STATES.PULL_VECTORS) {
+                    state = STATES.INNER_LOOP; outer_i = 0; outer_j = 0;
+                } else if (state === STATES.INNER_LOOP) {
+                    C_mat[outer_i][outer_j] += A_mat[outer_i][outer_k] * B_mat[outer_k][outer_j];
+                    
+                    if (loopOrder === 'ij') {
+                        outer_j++;
+                        if (outer_j >= TN) {
+                            outer_j = 0; outer_i++;
+                            if (outer_i >= TM) {
+                                outer_i = 0; outer_k++;
+                                if (outer_k >= BK) { state = STATES.DONE; togglePlayUI(false); }
+                                else state = STATES.PULL_VECTORS;
+                            }
+                        }
+                    } else { // 'ji'
+                        outer_i++;
+                        if (outer_i >= TM) {
+                            outer_i = 0; outer_j++;
+                            if (outer_j >= TN) {
+                                outer_j = 0; outer_k++;
+                                if (outer_k >= BK) { state = STATES.DONE; togglePlayUI(false); }
+                                else state = STATES.PULL_VECTORS;
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (step_idx >= (TM * TN)) { togglePlayUI(false); updateText(); return; }
+                
+                switch(state) {
+                    case STATES.IDLE: state = STATES.PULL_VECTORS; break;
+                    case STATES.PULL_VECTORS: state = STATES.CALC_MATH; break;
+                    case STATES.CALC_MATH: state = STATES.ACCUMULATE; break;
+                    case STATES.ACCUMULATE:
+                        let r = Math.floor(step_idx / TN), c = step_idx % TN;
+                        C_mat[r][c] += temp_scalar;
+                        
+                        step_idx++;
+                        if (step_idx < (TM * TN)) state = STATES.PULL_VECTORS;
+                        else { state = STATES.DONE; togglePlayUI(false); }
+                        break;
+                }
+            }
+            updateText();
+        }
+
+        function togglePlayUI(playing) {
+            isPlaying = playing;
+            iconPlay.className = playing ? 'fas fa-pause' : 'fas fa-play';
+            textPlay.innerText = playing ? 'Pause' : 'Play';
+        }
+
+        // --- Event Listeners ---
+        btnPlay.addEventListener('click', () => {
+            let isDone = (currentMode === MODES.OUTER) ? (state === STATES.DONE) : (step_idx >= (TM * TN));
+            if (isDone) resetViz();
+            togglePlayUI(!isPlaying);
+            if (isPlaying) {
+                if (state === STATES.IDLE) {
+                    state = STATES.PULL_VECTORS;
+                    if(currentMode === MODES.OUTER) { outer_k = 0; outer_i = 0; outer_j = 0; }
+                }
+                lastTime = performance.now(); updateText(); requestAnimationFrame(render);
+            }
+        });
+        
+        document.getElementById('btn-next').addEventListener('click', () => {
+            togglePlayUI(false); if (state === STATES.DONE) return;
+            
+            if (currentMode === MODES.OUTER) {
+                if (state === STATES.IDLE) {
+                    state = STATES.PULL_VECTORS; outer_k = 0;
+                } else if (state === STATES.PULL_VECTORS) {
+                    state = STATES.INNER_LOOP; outer_i = 0; outer_j = 0;
+                } else if (state === STATES.INNER_LOOP) {
+                    C_mat[outer_i][outer_j] += A_mat[outer_i][outer_k] * B_mat[outer_k][outer_j];
+                    
+                    if (loopOrder === 'ij') {
+                        outer_j++;
+                        if (outer_j >= TN) {
+                            outer_j = 0; outer_i++;
+                            if (outer_i >= TM) {
+                                outer_i = 0; outer_k++;
+                                if (outer_k >= BK) state = STATES.DONE;
+                                else state = STATES.PULL_VECTORS;
+                            }
+                        }
+                    } else { // 'ji'
+                        outer_i++;
+                        if (outer_i >= TM) {
+                            outer_i = 0; outer_j++;
+                            if (outer_j >= TN) {
+                                outer_j = 0; outer_k++;
+                                if (outer_k >= BK) state = STATES.DONE;
+                                else state = STATES.PULL_VECTORS;
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (state === STATES.IDLE) state = STATES.PULL_VECTORS;
+                else if (state === STATES.PULL_VECTORS) {
+                    state = STATES.CALC_MATH;
+                    let r=Math.floor(step_idx/TN), c=step_idx%TN; temp_scalar = 0;
+                    for(let k=0;k<BK;k++) temp_scalar += A_mat[r][k]*B_mat[k][c];
+                }
+                else if (state === STATES.CALC_MATH) state = STATES.ACCUMULATE;
+                else if (state === STATES.ACCUMULATE) {
+                    let r=Math.floor(step_idx/TN), c=step_idx%TN; C_mat[r][c] += temp_scalar;
+                    step_idx++;
+                    state = step_idx < (TM*TN) ? STATES.PULL_VECTORS : STATES.DONE;
+                }
+            }
+            
+            progress = 0.999; updateText(); requestAnimationFrame(render);
+        });
+
+        document.getElementById('btn-prev').addEventListener('click', () => {
+            togglePlayUI(false);
+            if (state === STATES.IDLE) return;
+            if (currentMode === MODES.OUTER && outer_k === 0 && state === STATES.PULL_VECTORS) { resetViz(); return; }
+            if (currentMode === MODES.DOT && step_idx === 0 && state === STATES.PULL_VECTORS) { resetViz(); return; }
+
+            if (currentMode === MODES.OUTER) {
+                if (state === STATES.DONE) {
+                    outer_k = BK - 1; outer_i = TM - 1; outer_j = TN - 1; state = STATES.INNER_LOOP;
+                } else if (state === STATES.PULL_VECTORS) {
+                    outer_k--; outer_i = TM - 1; outer_j = TN - 1; state = STATES.INNER_LOOP;
+                } else if (state === STATES.INNER_LOOP) {
+                    if (loopOrder === 'ij') {
+                        if (outer_j > 0) outer_j--;
+                        else if (outer_i > 0) { outer_i--; outer_j = TN - 1; }
+                        else state = STATES.PULL_VECTORS;
+                    } else { // 'ji'
+                        if (outer_i > 0) outer_i--;
+                        else if (outer_j > 0) { outer_j--; outer_i = TM - 1; }
+                        else state = STATES.PULL_VECTORS;
+                    }
+                }
+                
+                // Rebuild matrix
+                C_mat = Array(TM).fill().map(() => Array(TN).fill(0));
+                for (let k = 0; k <= outer_k; k++) {
+                    for (let i = 0; i < TM; i++) {
+                        for (let j = 0; j < TN; j++) {
+                            if (k < outer_k) {
+                                C_mat[i][j] += A_mat[i][k] * B_mat[k][j];
+                            }
+                            else if (k === outer_k && state === STATES.INNER_LOOP) {
+                                if (loopOrder === 'ij') {
+                                    if (i < outer_i || (i === outer_i && j < outer_j)) {
+                                        C_mat[i][j] += A_mat[i][k] * B_mat[k][j];
+                                    }
+                                } else { // 'ji'
+                                    if (j < outer_j || (j === outer_j && i < outer_i)) {
+                                        C_mat[i][j] += A_mat[i][k] * B_mat[k][j];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                let prev_idx = step_idx, prev_state = state;
+                let totalSteps = TM*TN;
+
+                if (state === STATES.DONE) { prev_idx = totalSteps-1; prev_state = STATES.ACCUMULATE; }
+                else if (state === STATES.PULL_VECTORS) { prev_idx--; prev_state = STATES.ACCUMULATE; }
+                else if (state === STATES.CALC_MATH) prev_state = STATES.PULL_VECTORS;
+                else if (state === STATES.ACCUMULATE) prev_state = STATES.CALC_MATH;
+
+                C_mat = Array(TM).fill().map(() => Array(TN).fill(0));
+                for (let s = 0; s < prev_idx; s++) {
+                    let r = Math.floor(s/TN), c = s%TN;
+                    for(let k=0; k<BK; k++) C_mat[r][c] += A_mat[r][k] * B_mat[k][c];
+                }
+
+                step_idx = prev_idx; state = prev_state;
+                if (state === STATES.CALC_MATH || state === STATES.ACCUMULATE) {
+                    let r=Math.floor(step_idx/TN), c=step_idx%TN; temp_scalar = 0;
+                    for(let k=0;k<BK;k++) temp_scalar += A_mat[r][k]*B_mat[k][c];
+                }
+            }
+
+            progress = 0.999;
+            updateText(); requestAnimationFrame(render);
+        });
+
+        function resetViz() {
+            togglePlayUI(false);
+            step_idx = 0; outer_k = 0; outer_i = 0; outer_j = 0; 
+            state = STATES.IDLE; progress = 0;
+            C_mat = Array(TM).fill().map(() => Array(TN).fill(0));
+            updateText(); requestAnimationFrame(render);
+        }
+
+        document.getElementById('btn-reset').addEventListener('click', resetViz);
+        sliderSpeed.addEventListener('input', (e) => { speedMult = parseFloat(e.target.value); });
+
+        // Initialize
+        updateConceptText();
+        updateText();
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>

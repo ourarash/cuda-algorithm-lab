@@ -1,0 +1,4 @@
+interface:
+  display_name: "CUDA Review Helper"
+  short_description: "Review CUDA kernels and visualizers for this repository"
+  default_prompt: "Use $cuda-review-helper to review CUDA code, algorithm progressions, Makefiles, or interactive visualizations in this repository."

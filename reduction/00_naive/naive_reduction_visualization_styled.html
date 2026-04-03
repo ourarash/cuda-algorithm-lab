@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA Reduction: Naive Interleaved Addressing</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .array-grid { 
+            display: flex; 
+            gap: 4px; 
+            justify-content: center;
+            position: relative;
+            margin-bottom: 2rem;
+            z-index: 10;
+        }
+        .cell {
+            width: 48px;
+            height: 48px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: bold;
+            border-radius: 6px;
+            transition: all 0.3s ease;
+            position: relative;
+            background-color: #f1f5f9;
+            border: 2px solid #cbd5e1;
+            color: #334155;
+            z-index: 20;
+        }
+        
+        .cell-idx {
+            font-size: 10px;
+            color: #94a3b8;
+            position: absolute;
+            top: -20px;
+        }
+
+        .active-write { 
+            background-color: #3b82f6 !important;
+            color: white !important; 
+            border-color: #2563eb !important;
+            transform: scale(1.1); 
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4); 
+            z-index: 30;
+        }
+
+        .active-read { 
+            background-color: #ef4444 !important;
+            color: white !important; 
+            border-color: #dc2626 !important;
+            transform: scale(1.1); 
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4); 
+            z-index: 30;
+        }
+        
+        .idle { opacity: 0.4; }
+        .completed { background-color: #dbeafe; border-color: #bfdbfe; color: #1e3a8a; }
+
+        .code-container { max-height: 400px; overflow-y: auto; }
+        .code-highlight { background-color: rgba(59, 130, 246, 0.2); border-left: 4px solid #3b82f6; }
+
+        svg.tree-svg {
+            position: absolute;
+            top: 50px;
+            left: 0;
+            width: 100%;
+            height: 120px;
+            z-index: 5;
+            pointer-events: none;
+            overflow: visible;
+        }
+
+        .tree-path {
+            fill: none;
+            stroke: #cbd5e1;
+            stroke-width: 3;
+            stroke-dasharray: 400;
+            stroke-dashoffset: 400;
+        }
+        
+        .tree-path.animate-path {
+            animation: draw-path 0.6s ease forwards;
+        }
+
+        @keyframes draw-path {
+            to { stroke-dashoffset: 0; }
+        }
+
+        .thread-block {
+            display: flex;
+            justify-content: center;
+            gap: 4px;
+            margin-top: 2rem;
+            flex-wrap: wrap;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .thread {
+            width: 36px;
+            height: 24px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #e2e8f0;
+            color: #64748b;
+            transition: all 0.3s;
+        }
+        
+        .thread.active {
+            background-color: #6366f1;
+            color: white;
+            box-shadow: 0 0 8px rgba(99, 102, 241, 0.6);
+            transform: translateY(-2px);
+        }
+        .thread.idle-warp {
+            background-color: #f1f5f9;
+            color: #cbd5e1;
+            opacity: 0.5;
+        }
+
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-8 font-sans">
+
+    <div class="max-w-6xl mx-auto">
+        <header class="mb-6 flex flex-wrap justify-between items-end gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-slate-800">Naive Reduction Visualizer</h1>
+                <p class="text-slate-600">Interleaved Addressing &amp; High Warp Divergence</p>
+            </div>
+            
+            <div class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 flex gap-6">
+                <div class="text-right">
+                    <div class="text-[10px] uppercase font-bold text-slate-400">Current Stride</div>
+                    <div id="strideDisplay" class="text-xl font-mono font-bold text-blue-600">-</div>
+                </div>
+                <div class="text-right border-l pl-6">
+                    <div class="text-[10px] uppercase font-bold text-slate-400">Active Threads</div>
+                    <div id="activeThreadsDisplay" class="text-xl font-mono font-bold text-indigo-600">-</div>
+                </div>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <div class="lg:col-span-4 space-y-4">
+                <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="font-bold text-slate-700 uppercase text-xs tracking-wider">Controls</h2>
+                        <div id="phaseIndicator" class="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-widest">Init</div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-2 mb-4">
+                        <button id="playPauseBtn" class="bg-blue-600 text-white py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2">
+                            <span id="playIcon">▶ Play</span>
+                        </button>
+                        <button id="stepBtn" class="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 rounded-lg font-bold text-sm border shadow-sm">Step Tree</button>
+                    </div>
+
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase">
+                            <span>Animation Speed</span>
+                            <span id="speedVal">Fast</span>
+                        </div>
+                        <input type="range" id="speedSlider" min="200" max="2000" value="800" class="w-full accent-blue-600">
+                        <button id="resetBtn" class="w-full text-center text-xs text-slate-400 underline font-medium mt-2">Reset</button>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900 text-slate-300 p-4 rounded-xl shadow-lg font-mono text-[11px] leading-relaxed code-container border border-slate-700">
+                    <div id="codeComment" class="text-blue-400 font-bold mb-2">// Method: Interleaved Addressing</div>
+                    <div id="line-init" class="rounded px-1 transition">unsigned int i = segment + threadIdx.x * 2;</div>
+                    <div class="h-2"></div>
+                    <div id="line-for" class="rounded px-1 transition text-yellow-300">for (unsigned int stride = 1; stride <= BLOCK_SIZE; stride *= 2) {</div>
+                    <div id="line-if" class="rounded px-1 ml-4 transition text-indigo-300">  if (threadIdx.x % stride == 0) {</div>
+                    <div id="line-math" class="rounded px-1 ml-8 transition text-red-300">    input[i] += input[i + stride];</div>
+                    <div class="rounded px-1 ml-4">  }</div>
+                    <div id="line-sync" class="rounded px-1 ml-4 transition text-purple-300">  __syncthreads();</div>
+                    <div class="rounded px-1">}</div>
+                </div>
+            </div>
+
+            <div class="lg:col-span-8 space-y-6">
+                <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col relative">
+                    
+                    <h3 class="text-sm font-bold text-slate-700 uppercase tracking-widest text-center mb-8">Global Memory Array</h3>
+                    
+                    <div class="relative w-full" id="svgContainer">
+                        <div id="arrayContainer" class="array-grid"></div>
+                        <svg class="tree-svg" id="treeSvg"></svg>
+                    </div>
+
+                    <h3 class="text-sm font-bold text-slate-700 uppercase tracking-widest text-center mt-12 mb-2">Thread Block Execution (Warp)</h3>
+                    <div id="threadContainer" class="thread-block"></div>
+
+                    <div class="mt-4 p-4 bg-slate-50 border border-slate-100 rounded-lg text-xs text-slate-600 text-center max-w-2xl mx-auto">
+                        <b class="text-slate-800">Warp Divergence:</b> Notice how threads not satisfying <code class="bg-slate-200 px-1 rounded">threadIdx.x % stride == 0</code> go idle (grayed out).
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+    </div>
+
+    <script>
+        const N = 16; 
+        const NUM_THREADS = N / 2; // 8 threads
+        let initialArray = [10, 1, 8, -1, 0, -2, 3, 5, -2, -3, 2, 7, 0, 11, 0, 2];
+        let memory = [...initialArray];
+        let stride = 1;
+        let isPlaying = false;
+        let speed = 800;
+
+        const arrayContainer = document.getElementById('arrayContainer');
+        const treeSvg = document.getElementById('treeSvg');
+        const threadContainer = document.getElementById('threadContainer');
+        const lines = { for: document.getElementById('line-for'), if: document.getElementById('line-if'), math: document.getElementById('line-math'), sync: document.getElementById('line-sync') };
+
+        function init() {
+            arrayContainer.innerHTML = '';
+            threadContainer.innerHTML = '';
+            treeSvg.innerHTML = Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'defs'), {
+                innerHTML: '<marker id="arrowhead" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto"><polygon points="0 0, 6 2, 0 4" fill="#cbd5e1" /></marker>'
+            }).outerHTML;
+            
+            for (let i = 0; i < N; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.id = 'mem-' + i;
+                cell.innerHTML = `<div class="cell-idx">${i}</div><span class="val">${memory[i]}</span>`;
+                arrayContainer.appendChild(cell);
+            }
+
+            for (let t = 0; t < NUM_THREADS; t++) {
+                const th = document.createElement('div');
+                th.className = 'thread';
+                th.id = 'th-' + t;
+                th.innerText = 'T' + t;
+                threadContainer.appendChild(th);
+            }
+
+            stride = 1;
+            memory = [...initialArray];
+            updateDisplays();
+        }
+
+        function updateDisplays() {
+            document.getElementById('strideDisplay').innerText = stride <= NUM_THREADS ? stride : '-';
+            let activeCount = 0;
+            if (stride <= NUM_THREADS) {
+                for (let t = 0; t < NUM_THREADS; t++) if (t % stride === 0) activeCount++;
+                document.getElementById('activeThreadsDisplay').innerText = activeCount + ' / ' + NUM_THREADS;
+            }
+        }
+
+        function drawCurve(fromIdx, toIdx) {
+            const cell1 = document.getElementById('mem-' + fromIdx);
+            const cell2 = document.getElementById('mem-' + toIdx);
+            if(!cell1 || !cell2) return;
+
+            const r1 = cell1.getBoundingClientRect(), r2 = cell2.getBoundingClientRect(), sr = treeSvg.getBoundingClientRect();
+            const x1 = r1.left + r1.width/2 - sr.left;
+            const x2 = r2.left + r2.width/2 - sr.left;
+            const drop = 20 + stride * 5;
+
+            const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            path.setAttribute("class", "tree-path animate-path");
+            path.setAttribute("d", `M ${x2} 20 Q ${(x1+x2)/2} ${drop + 20} ${x1} 20`);
+            path.setAttribute("marker-end", "url(#arrowhead)");
+            path.style.animationDuration = (speed * 0.7) + 'ms';
+            treeSvg.appendChild(path);
+        }
+
+        function highlight(key) {
+            Object.values(lines).forEach(el => el.classList.remove('code-highlight'));
+            if (key) lines[key].classList.add('code-highlight');
+        }
+
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        async function stepSimulation() {
+            if (stride > NUM_THREADS) {
+                document.getElementById('phaseIndicator').innerText = "Done";
+                isPlaying = false;
+                updatePlayBtn();
+                return;
+            }
+
+            document.getElementById('phaseIndicator').innerText = "Stride " + stride;
+            highlight('for');
+            await sleep(speed * 0.4);
+
+            const updates = [];
+            for (let t = 0; t < NUM_THREADS; t++) {
+                const thEl = document.getElementById('th-' + t);
+                if (t % stride === 0) {
+                    thEl.className = 'thread active';
+                    updates.push({ w: t * 2, r: (t * 2) + stride });
+                } else {
+                    thEl.className = 'thread idle-warp';
+                }
+            }
+
+            highlight('if');
+            await sleep(speed * 0.4);
+
+            highlight('math');
+            updates.forEach(u => {
+                document.getElementById('mem-' + u.r).classList.add('active-read');
+                drawCurve(u.w, u.r);
+            });
+
+            await sleep(speed * 0.8);
+
+            updates.forEach(u => {
+                memory[u.w] += memory[u.r];
+                const c = document.getElementById('mem-' + u.w);
+                c.querySelector('.val').innerText = memory[u.w];
+                c.classList.add('active-write');
+                const r = document.getElementById('mem-' + u.r);
+                r.classList.remove('active-read');
+                r.classList.add('idle');
+            });
+
+            await sleep(speed);
+
+            highlight('sync');
+            updates.forEach(u => {
+                document.getElementById('mem-' + u.w).classList.remove('active-write');
+                document.getElementById('mem-' + u.w).classList.add('completed');
+            });
+            treeSvg.innerHTML = '<defs><marker id="arrowhead" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto"><polygon points="0 0, 6 2, 0 4" fill="#cbd5e1" /></marker></defs>';
+
+            await sleep(speed * 0.4);
+
+            stride *= 2;
+            updateDisplays();
+            if (isPlaying && stride <= NUM_THREADS) stepSimulation();
+        }
+
+        function updatePlayBtn() {
+            document.getElementById('playIcon').innerText = isPlaying ? '⏸ Pause' : '▶ Play';
+            const btn = document.getElementById('playPauseBtn');
+            btn.className = isPlaying ? 'py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2 bg-orange-500 hover:bg-orange-600 text-white' 
+                                      : 'py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white';
+        }
+
+        document.getElementById('stepBtn').onclick = async () => { isPlaying = false; updatePlayBtn(); await stepSimulation(); };
+        document.getElementById('resetBtn').onclick = () => { isPlaying = false; updatePlayBtn(); init(); document.getElementById('phaseIndicator').innerText='Init'; };
+        document.getElementById('playPauseBtn').onclick = () => { if(stride > NUM_THREADS) init(); isPlaying = !isPlaying; updatePlayBtn(); if(isPlaying) stepSimulation(); };
+        document.getElementById('speedSlider').oninput = e => { speed = 2200 - parseInt(e.target.value); };
+
+        init();
+    </script>
+</body>
+</html>
