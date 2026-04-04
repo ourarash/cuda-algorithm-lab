@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CUDA Matrix Transpose & Shared Memory Bank Conflicts</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; }
+        
+        .matrix-grid { display: grid; gap: 3px; padding: 6px; background-color: #1e293b; border-radius: 6px; border: 1px solid #334155; }
+        .grid-8 { grid-template-columns: repeat(8, 1fr); }
+        .grid-9 { grid-template-columns: repeat(9, 1fr); }
+        
+        .cell {
+            width: 35px; height: 35px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 12px; font-weight: 600;
+            background-color: #334155;
+            color: #94a3b8;
+            border-radius: 2px;
+            transition: all 0.3s ease;
+        }
+
+        .cell.pad { background-color: #1e293b; color: #475569; background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(255,255,255,0.05) 4px, rgba(255,255,255,0.05) 8px); }
+        
+        /* Bank Colors */
+        .bank-0 { background-color: #ef4444; color: #fff; } /* Red */
+        .bank-1 { background-color: #f97316; color: #fff; } /* Orange */
+        .bank-2 { background-color: #eab308; color: #fff; } /* Yellow */
+        .bank-3 { background-color: #22c55e; color: #fff; } /* Green */
+        .bank-4 { background-color: #06b6d4; color: #fff; } /* Cyan */
+        .bank-5 { background-color: #3b82f6; color: #fff; } /* Blue */
+        .bank-6 { background-color: #a855f7; color: #fff; } /* Purple */
+        .bank-7 { background-color: #ec4899; color: #fff; } /* Pink */
+
+        /* Animation States */
+        .highlight-read { transform: scale(1.1); box-shadow: 0 0 8px #fff; z-index: 10; border: 2px solid white; color: white;}
+        .highlight-write { transform: scale(1.1); box-shadow: 0 0 8px #22c55e; z-index: 10; background-color: #22c55e; color: white; border: 2px solid white;}
+        
+        .conflict-glow { 
+            animation: conflict-flash 0.6s infinite; 
+            border: 3px solid #fff !important; 
+            z-index: 20; 
+            transform: scale(1.2); 
+            color: #fff !important;
+            font-weight: 800;
+        }
+        
+        .success-glow { animation: pulse-green 1s infinite; border: 2px solid #22c55e; z-index: 10; transform: scale(1.1); color: white;}
+
+        @keyframes conflict-flash {
+            0%, 100% { box-shadow: 0 0 10px 2px #ef4444; filter: brightness(1); }
+            50% { box-shadow: 0 0 25px 8px #ef4444, inset 0 0 15px rgba(255,255,255,0.4); filter: brightness(1.4); }
+        }
+        
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+
+        .code-snippet { font-family: 'Fira Code', monospace; background: #1e293b; padding: 2px 6px; border-radius: 4px; color: #38bdf8; font-size: 0.9em; }
+        
+        .populated { background-color: #0ea5e9 !important; color: #fff !important; font-weight: bold; border-color: #0284c7; }
+        
+        /* Feature 2: Thread Indicators */
+        .cell { position: relative; } /* Needed to anchor the badge */
+        .thread-badge {
+            position: absolute;
+            top: -6px; right: -6px;
+            background-color: #f59e0b;
+            color: #fff;
+            font-size: 9px;
+            font-weight: 800;
+            padding: 1px 3px;
+            border-radius: 4px;
+            z-index: 30;
+            box-shadow: 0 0 4px rgba(0,0,0,0.5);
+            pointer-events: none;
+            animation: pop-in 0.2s ease-out forwards;
+        }
+
+        @keyframes pop-in {
+            0% { transform: scale(0); }
+            100% { transform: scale(1); }
+        }
+
+        /* Feature 3: Tooltip Container */
+        #smem-tooltip {
+            pointer-events: none;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden">
+
+    <!-- Header -->
+    <header class="bg-slate-900 border-b border-slate-700 p-4 flex justify-between items-center shrink-0">
+        <div>
+            <h1 class="text-xl font-bold text-white">CUDA Shared Memory Bank Conflicts</h1>
+            <p class="text-sm text-slate-400">Matrix Transpose Optimization (Scaled to 8x8 Tile, 8 Banks)</p>
+        </div>
+        <div class="flex space-x-2">
+            <div id="step-indicator" class="text-slate-300 font-mono bg-slate-800 px-3 py-1 rounded">Step 1 of 7</div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col md:flex-row overflow-hidden relative">
+        
+        <!-- Left Panel: Visualization -->
+        <div class="flex-1 p-6 flex flex-col items-center bg-slate-800 overflow-y-auto relative">
+            
+            <!-- Feature 5: Global Context Mini-Map -->
+            <div id="minimap" class="absolute top-4 left-4 p-3 bg-slate-900 rounded-lg border border-slate-700 hidden md:flex flex-col items-center opacity-80 hover:opacity-100 transition-opacity shadow-lg">
+                <h4 class="text-[10px] uppercase font-bold text-slate-400 mb-2 tracking-wider">Global Grid</h4>
+                <div class="grid grid-cols-4 gap-[2px] bg-slate-600 border border-slate-500 p-[2px] rounded-sm">
+                    <!-- 16 blocks representing a 32x32 matrix split into 8x8 tiles -->
+                    <div class="w-4 h-4 bg-sky-500 border border-sky-300 animate-pulse" title="Active Thread Block"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                    <div class="w-4 h-4 bg-slate-800"></div>
+                </div>
+                <p class="text-[9px] text-slate-500 text-center mt-2 leading-tight">32x32 Matrix<br><span class="text-sky-400">1 Block Active</span></p>
+            </div>
+
+            <div class="flex flex-col space-y-4 mb-8 w-full items-center">
+                <!-- Global Input -->
+                <div class="flex flex-col items-center">
+                    <h3 class="mb-1 font-semibold text-slate-300">Global Input</h3>
+                    <div id="op-input" class="text-xs font-mono h-5 text-sky-400 opacity-0 transition-opacity duration-300"></div>
+                    <div id="grid-input" class="matrix-grid grid-8"></div>
+                </div>
+
+                <!-- Animated Read Arrow -->
+                <div id="arrow-read" class="text-sky-400 text-4xl font-bold opacity-0 transition-opacity duration-300 h-12 flex items-center justify-center">↓</div>
+
+                <!-- Shared Memory -->
+                <div class="flex flex-col items-center relative">
+                    <h3 class="mb-1 font-semibold text-sky-400">Shared Memory <span id="smem-size" class="text-xs ml-1 bg-sky-900 px-1 rounded">[8][8]</span></h3>
+                    <div id="op-smem" class="text-xs font-mono h-5 text-green-400 opacity-0 transition-opacity duration-300"></div>
+                    <div id="grid-smem" class="matrix-grid grid-8"></div>
+                    <div id="conflict-warning" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-red-600 text-white font-bold px-4 py-2 rounded shadow-lg shadow-red-500/50 hidden z-50 whitespace-nowrap">
+                        ⚠️ 8-Way Bank Conflict!
+                    </div>
+                </div>
+
+                <!-- Animated Write Arrow -->
+                <div id="arrow-write" class="text-green-400 text-4xl font-bold opacity-0 transition-opacity duration-300 h-12 flex items-center justify-center">↓</div>
+
+                <!-- Global Output -->
+                <div class="flex flex-col items-center">
+                    <h3 class="mb-1 font-semibold text-slate-300">Global Output</h3>
+                    <div id="op-output" class="text-xs font-mono h-5 text-sky-400 opacity-0 transition-opacity duration-300"></div>
+                    <div id="grid-output" class="matrix-grid grid-8"></div>
+                </div>
+            </div>
+
+            <!-- Legend -->
+            <div id="bank-legend" class="mt-4 p-4 bg-slate-900 rounded-lg border border-slate-700 transition-opacity">
+                <h4 class="text-xs uppercase tracking-wider text-slate-400 mb-2 text-center">Shared Memory Banks</h4>
+                <div class="flex space-x-2">
+                    <div class="flex items-center"><div class="w-4 h-4 bank-0 rounded mr-1"></div><span class="text-xs">0</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-1 rounded mr-1"></div><span class="text-xs">1</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-2 rounded mr-1"></div><span class="text-xs">2</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-3 rounded mr-1"></div><span class="text-xs">3</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-4 rounded mr-1"></div><span class="text-xs">4</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-5 rounded mr-1"></div><span class="text-xs">5</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-6 rounded mr-1"></div><span class="text-xs">6</span></div>
+                    <div class="flex items-center"><div class="w-4 h-4 bank-7 rounded mr-1"></div><span class="text-xs">7</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Controls & Explanation -->
+        <div class="w-full md:w-1/3 bg-slate-900 border-l border-slate-700 p-6 flex flex-col shrink-0">
+            
+            <!-- Toggle -->
+            <div class="mb-6 flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700 shadow-inner">
+                <span id="label-standard" class="text-xs md:text-sm font-bold text-red-400 transition-colors">Standard Kernel<br><span class="font-normal text-xs">(Conflicts)</span></span>
+                <label class="relative inline-flex items-center cursor-pointer mx-2 shrink-0">
+                    <input type="checkbox" id="kernel-toggle" class="sr-only peer">
+                    <div class="w-12 h-6 bg-red-500 rounded-full peer peer-checked:bg-green-500 transition-colors duration-300"></div>
+                    <div class="absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform duration-300 peer-checked:translate-x-6"></div>
+                </label>
+                <span id="label-padded" class="text-xs md:text-sm font-bold text-slate-500 transition-colors text-right">Padded Kernel<br><span class="font-normal text-xs">(Conflict-Free)</span></span>
+            </div>
+
+            <div class="flex-1 overflow-y-auto pr-2">
+                <h2 id="step-title" class="text-xl font-bold text-sky-400 mb-4">Phase 1: Global Read</h2>
+                <div id="step-desc" class="text-slate-300 space-y-4 text-sm mb-6 leading-relaxed">
+                    Description goes here.
+                </div>
+                
+                <div class="relative group">
+                    <h4 class="text-xs uppercase tracking-wider text-slate-500 mb-2">Active Kernel Code</h4>
+                    <pre id="code-snippet" class="bg-slate-950 p-4 rounded-lg text-xs text-sky-300 font-mono overflow-x-auto border border-slate-800 shadow-inner"></pre>
+                </div>
+            </div>
+
+            <!-- Playback Controls -->
+            <div class="mt-6 pt-4 border-t border-slate-700 shrink-0">
+                <div class="flex justify-between items-center mb-4 text-xs text-slate-400 font-mono">
+                    <span>Execution Step: <span id="lbl-step" class="text-sky-400 font-bold text-sm">0</span> / 16</span>
+                </div>
+                <div class="flex space-x-2">
+                    <button id="btn-restart" class="p-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white rounded transition focus:outline-none" title="Restart">
+                        ⏮
+                    </button>
+                    <button id="btn-back" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-semibold py-2 px-4 rounded transition disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none">
+                        ← Back
+                    </button>
+                    <button id="btn-play" class="flex-1 bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2 px-4 rounded transition shadow-lg shadow-sky-500/20 focus:outline-none">
+                        Play ▶
+                    </button>
+                    <button id="btn-next" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-semibold py-2 px-4 rounded transition disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none">
+                        Next →
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Feature 3: Tooltip Floating Container -->
+        <div id="smem-tooltip" class="fixed hidden bg-slate-900 border border-slate-600 text-slate-200 text-xs p-3 rounded shadow-2xl leading-relaxed">
+            <!-- Populated by JS on hover -->
+        </div>
+    </main>
+
+    <script>
+        const TILE = 8;
+        const BANKS = 8;
+        let isPadded = false;
+        let timeStep = 0; // 0 to 16
+        let isPlaying = false;
+        let playInterval = null;
+
+        // DOM Elements
+        const gridInput = document.getElementById('grid-input');
+        const gridSmem = document.getElementById('grid-smem');
+        const gridOutput = document.getElementById('grid-output');
+        const smemSize = document.getElementById('smem-size');
+        const stepTitle = document.getElementById('step-title');
+        const stepDesc = document.getElementById('step-desc');
+        const btnPrev = document.getElementById('btn-back');
+        const btnNext = document.getElementById('btn-next');
+        const btnRestart = document.getElementById('btn-restart');
+        const btnPlay = document.getElementById('btn-play');
+        const conflictWarning = document.getElementById('conflict-warning');
+        const kernelToggle = document.getElementById('kernel-toggle');
+
+        function createGrid(container, rows, cols, isPad = false) {
+            container.innerHTML = '';
+            container.className = `matrix-grid ${cols === 9 ? 'grid-9' : 'grid-8'}`;
+            const stride = cols;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.id = `${container.id}-r${r}-c${c}`;
+                    
+                    // Calculate the 1D memory address relative to the tile
+                    const addr = (r * stride + c).toString().padStart(2, '0');
+                    
+                    if (isPad && c === cols - 1) {
+                        cell.classList.add('pad');
+                        cell.innerText = addr;
+                    } else if (container.id === 'grid-output') {
+                        cell.innerText = ''; // Output starts visually empty
+                    } else {
+                        cell.innerText = addr;
+                    }
+                    container.appendChild(cell);
+                }
+            }
+        }
+
+        function clearHighlights() {
+            document.querySelectorAll('.cell').forEach(c => {
+                c.classList.remove('highlight-read', 'highlight-write', 'conflict-glow', 'success-glow');
+            });
+            gridSmem.classList.remove('highlight-read');
+            conflictWarning.classList.add('hidden');
+            
+            // Remove thread badges
+            document.querySelectorAll('.thread-badge').forEach(b => b.remove());
+        }
+
+        function colorBanks(padded = false) {
+            const cols = padded ? TILE + 1 : TILE;
+            for (let r = 0; r < TILE; r++) {
+                for (let c = 0; c < TILE; c++) {
+                    const cell = document.getElementById(`grid-smem-r${r}-c${c}`);
+                    const address = r * cols + c;
+                    const bank = address % BANKS;
+                    cell.classList.add(`bank-${bank}`);
+                    cell.style.backgroundColor = '';
+                    cell.style.color = '';
+                }
+            }
+        }
+
+        function renderAll() {
+            createGrid(gridInput, TILE, TILE);
+            createGrid(gridSmem, TILE, isPadded ? TILE + 1 : TILE, isPadded);
+            createGrid(gridOutput, TILE, TILE);
+            colorBanks(isPadded);
+            
+            const labelStandard = document.getElementById('label-standard');
+            const labelPadded = document.getElementById('label-padded');
+            if (isPadded) {
+                labelStandard.className = "text-xs md:text-sm font-bold text-slate-500 transition-colors";
+                labelPadded.className = "text-xs md:text-sm font-bold text-green-400 transition-colors text-right";
+                smemSize.innerText = "[8][9]";
+            } else {
+                labelStandard.className = "text-xs md:text-sm font-bold text-red-400 transition-colors";
+                labelPadded.className = "text-xs md:text-sm font-bold text-slate-500 transition-colors text-right";
+                smemSize.innerText = "[8][8]";
+            }
+            
+            applyTimeStep();
+        }
+
+        // Helper to add thread badges
+        function addThreadBadge(cell, threadId) {
+            const badge = document.createElement('div');
+            badge.className = 'thread-badge';
+            badge.innerText = `T${threadId}`;
+            cell.appendChild(badge);
+        }
+
+        function applyTimeStep() {
+            clearHighlights();
+            
+            const opInput = document.getElementById('op-input');
+            const opSmem = document.getElementById('op-smem');
+            const opOutput = document.getElementById('op-output');
+            const arrowRead = document.getElementById('arrow-read');
+            const arrowWrite = document.getElementById('arrow-write');
+            
+            // reset labels and arrows
+            opInput.style.opacity = '0';
+            opSmem.style.opacity = '0';
+            opOutput.style.opacity = '0';
+            arrowRead.style.opacity = '0';
+            arrowWrite.style.opacity = '0';
+            
+            // Populate Output Grid Data chronologically
+            for(let r=0; r<TILE; r++) {
+                for(let c=0; c<TILE; c++) {
+                    let outCell = document.getElementById(`grid-output-r${r}-c${c}`);
+                    let isWritten = r < (timeStep - 9); 
+                    let isActive = r === (timeStep - 9);
+                    
+                    if (isWritten || isActive) {
+                        // The output at [r][c] receives data from input [c][r].
+                        // Show the 1D address of the source data so we can see the transpose happen.
+                        const srcAddr = (c * TILE + r).toString().padStart(2, '0');
+                        outCell.innerText = srcAddr; 
+                        if (isWritten) outCell.classList.add('populated');
+                    } else {
+                        outCell.innerText = ``; 
+                        outCell.classList.remove('populated');
+                    }
+                }
+            }
+
+            document.getElementById('lbl-step').innerText = timeStep;
+            
+            // Dynamic Code Snippet with Syntax Highlighting
+            const codeSnippet = document.getElementById('code-snippet');
+            if(isPadded) {
+                codeSnippet.innerHTML = `<span class="text-pink-400">__shared__</span> <span class="text-pink-400">float</span> tile[<span class="text-orange-400">TILE</span>][<span class="text-orange-400">TILE</span> + <span class="text-purple-400">1</span>]; <span class="text-slate-500">// Padded</span>
+
+<span class="text-slate-500">// 1. Read to shared (Coalesced)</span>
+tile[<span class="text-purple-300">threadIdx.y</span>][<span class="text-purple-300">threadIdx.x</span>] = input[in_row][in_col];
+
+<span class="text-pink-400">__syncthreads</span>();
+
+<span class="text-slate-500">// 2. Write to global (Conflict-Free!)</span>
+output[out_row][out_col] = tile[<span class="text-purple-300">threadIdx.x</span>][<span class="text-purple-300">threadIdx.y</span>];`;
+            } else {
+                codeSnippet.innerHTML = `<span class="text-pink-400">__shared__</span> <span class="text-pink-400">float</span> tile[<span class="text-orange-400">TILE</span>][<span class="text-orange-400">TILE</span>]; <span class="text-slate-500">// Standard</span>
+
+<span class="text-slate-500">// 1. Read to shared (Coalesced)</span>
+tile[<span class="text-purple-300">threadIdx.y</span>][<span class="text-purple-300">threadIdx.x</span>] = input[in_row][in_col];
+
+<span class="text-pink-400">__syncthreads</span>();
+
+<span class="text-slate-500">// 2. Write to global (Conflict!)</span>
+output[out_row][out_col] = tile[<span class="text-purple-300">threadIdx.x</span>][<span class="text-purple-300">threadIdx.y</span>];`;
+            }
+
+            // Phase and Highlighting Logic
+            if (timeStep < 8) {
+                stepTitle.innerText = `Phase 1: Global Read (Row ${timeStep})`;
+                stepDesc.innerHTML = `<p>Threads in a warp are reading consecutive elements from Global Input row <strong>${timeStep}</strong> into Shared Memory.</p>
+                <p>Because consecutive threads access adjacent memory addresses in global memory, this is a fast <strong>Coalesced Read</strong>.</p>`;
+                
+                opInput.innerText = `Read: input[in_row=${timeStep}][threadIdx.x]`;
+                opInput.className = 'text-xs font-mono h-5 text-sky-400 opacity-100 transition-opacity duration-300';
+                opSmem.innerText = `Write: tile[threadIdx.y=${timeStep}][threadIdx.x]`;
+                opSmem.className = 'text-xs font-mono h-5 text-green-400 opacity-100 transition-opacity duration-300';
+                arrowRead.style.opacity = '1';
+                arrowRead.className = 'text-sky-400 text-4xl font-bold opacity-100 transition-opacity duration-300 h-12 flex items-center justify-center animate-bounce';
+
+                let r = timeStep;
+                for(let c=0; c<TILE; c++) {
+                    let inCell = document.getElementById(`grid-input-r${r}-c${c}`);
+                    let smCell = document.getElementById(`grid-smem-r${r}-c${c}`);
+                    
+                    inCell.classList.add('highlight-read');
+                    smCell.classList.add('highlight-write');
+                    
+                    addThreadBadge(inCell, c);
+                    addThreadBadge(smCell, c);
+                }
+            } else if (timeStep === 8) {
+                stepTitle.innerText = `Phase 2: __syncthreads()`;
+                stepDesc.innerHTML = `<p>All threads wait at this barrier until the entire tile is fully loaded into Shared Memory.</p>
+                <p>This ensures no thread reads from Shared Memory before the transposed data is actually there.</p>`;
+                
+                opSmem.innerText = `__syncthreads()`;
+                opSmem.className = 'text-xs font-mono h-5 text-slate-400 opacity-100 transition-opacity duration-300';
+                
+                gridSmem.classList.add('highlight-read'); 
+            } else if (timeStep <= 16) {
+                let c = timeStep - 9;
+                stepTitle.innerText = `Phase 3: Global Write (Shared Col ${c})`;
+                
+                let conflictClass = isPadded ? 'text-green-400' : 'text-red-400';
+                opSmem.innerText = `Read: tile[threadIdx.x][threadIdx.y=${c}]`;
+                opSmem.className = `text-xs font-mono h-5 ${conflictClass} opacity-100 transition-opacity duration-300`;
+                opOutput.innerText = `Write: output[out_row=${c}][threadIdx.x]`;
+                opOutput.className = 'text-xs font-mono h-5 text-sky-400 opacity-100 transition-opacity duration-300';
+                arrowWrite.style.opacity = '1';
+                arrowWrite.className = `${conflictClass} text-4xl font-bold opacity-100 transition-opacity duration-300 h-12 flex items-center justify-center animate-bounce`;
+
+                if (isPadded) {
+                    stepDesc.innerHTML = `<p>Threads read down Shared Memory column <strong>${c}</strong> and write to Global Output row <strong>${c}</strong>.</p>
+                    <div class="p-3 bg-green-900/40 border border-green-500 rounded text-green-300"><strong class="text-green-400 block mb-1">✓ No Bank Conflicts!</strong> The +1 padding skewed the memory addresses so every element in this column lands in a different bank. All reads execute simultaneously.</div>`;
+                } else {
+                    stepDesc.innerHTML = `<p>Threads read down Shared Memory column <strong>${c}</strong> and write to Global Output row <strong>${c}</strong>.</p>
+                    <div class="p-3 bg-red-900/40 border border-red-500 rounded text-red-300"><strong class="text-red-400 block mb-1">⚠️ 8-Way Bank Conflict!</strong> The stride is exactly 8 (the number of banks). All 8 threads request memory from the exact same bank simultaneously. The hardware must serialize these requests, crippling performance.</div>`;
+                    conflictWarning.classList.remove('hidden');
+                }
+
+                for(let r=0; r<TILE; r++) {
+                    let smemCell = document.getElementById(`grid-smem-r${r}-c${c}`);
+                    if (!isPadded) smemCell.classList.add('conflict-glow');
+                    else smemCell.classList.add('success-glow');
+                    
+                    let outCell = document.getElementById(`grid-output-r${c}-c${r}`);
+                    outCell.classList.add('highlight-write');
+                    
+                    // Notice thread index is `r` (threadIdx.x) because threads read down the column
+                    addThreadBadge(smemCell, r);
+                    addThreadBadge(outCell, r);
+                }
+            }
+
+            btnPrev.disabled = (timeStep === 0);
+            btnNext.disabled = (timeStep === 16);
+        }
+
+        function togglePlay() {
+            isPlaying = !isPlaying;
+            btnPlay.innerHTML = isPlaying ? 'Pause ⏸' : 'Play ▶';
+            btnPlay.className = isPlaying 
+                ? "flex-1 bg-amber-600 hover:bg-amber-500 text-white font-semibold py-2 px-4 rounded transition shadow-lg shadow-amber-500/20 focus:outline-none"
+                : "flex-1 bg-sky-600 hover:bg-sky-500 text-white font-semibold py-2 px-4 rounded transition shadow-lg shadow-sky-500/20 focus:outline-none";
+
+            if (isPlaying) {
+                if (timeStep === 16) {
+                    timeStep = 0;
+                    applyTimeStep();
+                }
+                playInterval = setInterval(() => {
+                    if (timeStep < 16) {
+                        timeStep++;
+                        applyTimeStep();
+                    } else {
+                        togglePlay(); // auto-pause at end
+                    }
+                }, 1000);
+            } else {
+                clearInterval(playInterval);
+            }
+        }
+
+        // Event Listeners
+        kernelToggle.addEventListener('change', (e) => {
+            isPadded = e.target.checked;
+            if(isPlaying) togglePlay(); // Pause to avoid jarring shifts
+            renderAll();
+        });
+
+        btnPrev.addEventListener('click', () => {
+            if (isPlaying) togglePlay();
+            if (timeStep > 0) { timeStep--; applyTimeStep(); }
+        });
+
+        btnNext.addEventListener('click', () => {
+            if (isPlaying) togglePlay();
+            if (timeStep < 16) { timeStep++; applyTimeStep(); }
+        });
+
+        btnRestart.addEventListener('click', () => {
+            if (isPlaying) togglePlay();
+            timeStep = 0;
+            applyTimeStep();
+        });
+
+        btnPlay.addEventListener('click', togglePlay);
+
+        // Feature 3: Interactive Shared Memory Tooltips
+        gridSmem.addEventListener('mouseover', (e) => {
+            const cell = e.target.closest('.cell');
+            if(!cell || cell.classList.contains('pad')) return;
+            
+            // Extract the original text address (ignoring dynamically added thread badges)
+            const textNode = cell.firstChild;
+            if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return;
+            
+            const addr = parseInt(textNode.textContent, 10);
+            if (isNaN(addr)) return;
+            
+            const bank = addr % BANKS;
+            const tooltip = document.getElementById('smem-tooltip');
+            tooltip.innerHTML = `
+                <div class="font-mono text-sky-300 mb-1 border-b border-slate-700 pb-1">Memory Address: <span class="text-white">${addr}</span></div>
+                <div class="font-mono text-slate-400">Modulo Math: <span class="text-white">${addr} % 8</span></div>
+                <div class="font-mono text-green-400 mt-1">Assignment: <span class="text-white font-bold">Bank ${bank}</span></div>
+            `;
+            tooltip.classList.remove('hidden');
+        });
+
+        gridSmem.addEventListener('mousemove', (e) => {
+            const tooltip = document.getElementById('smem-tooltip');
+            tooltip.style.left = (e.clientX + 15) + 'px';
+            tooltip.style.top = (e.clientY + 15) + 'px';
+        });
+
+        gridSmem.addEventListener('mouseout', (e) => {
+            document.getElementById('smem-tooltip').classList.add('hidden');
+        });
+
+        // Initial render
+        renderAll();
+    </script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-SUBDIRS = basics libraries matmul matmul_siboehm memory optimization scan sort sparse warp xor
+SUBDIRS = basics libraries matmul matmul_siboehm matrix_transpose memory optimization scan sort sparse warp xor
 CUDA_FILES = $(wildcard *.cu)
 TARGETS = $(CUDA_FILES:.cu=)
 
