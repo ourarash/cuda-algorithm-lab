@@ -21,6 +21,7 @@ visualizations to make the algorithm flow easier to follow.
 - `basics/`: CUDA basics, thread hierarchy, vector add, runtime API examples
 - `libraries/`: library-based examples such as cuBLAS GEMM
 - `matmul/`: progressively better GEMM kernels and visual explanations
+- `matrix_transpose/`: shared-memory matrix transpose with bank-conflict avoidance
 - `matmul_siboehm/`: study notes and implementations inspired by GEMM
   optimization walkthroughs
 - `memory/`: memory-management focused examples
@@ -53,6 +54,7 @@ Build one specific example folder:
 ```bash
 make -C scan/00_kogge_stone
 make -C matmul/02_shared_memory
+make -C matrix_transpose
 ```
 
 Clean generated binaries:

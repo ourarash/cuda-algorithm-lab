@@ -8,5 +8,5 @@
 .DS_Store
 *.md2
 *.bazel.lock
-
+.venv
 *.x
