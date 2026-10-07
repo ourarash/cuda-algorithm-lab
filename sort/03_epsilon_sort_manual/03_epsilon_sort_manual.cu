@@ -13,26 +13,13 @@
  * - Validate the resulting approximate order on the CPU.
  */
 #include <algorithm>
-#include <cfloat>  // Added for DBL_MAX
+#include <cfloat>  // DBL_MAX
 #include <cmath>
 #include <iostream>
-#include <limits>
-#include <numeric>
-#include <random>  // Added for random number generation
+#include <random>
 #include <vector>
 
-// ==========================================================================
-// CUDA Error Checking Utility
-// ==========================================================================
-#define CUDA_CHECK(err)                                                 \
-  {                                                                     \
-    cudaError_t err_ = (err);                                           \
-    if (err_ != cudaSuccess) {                                          \
-      std::cerr << "CUDA error in " << __FILE__ << " line " << __LINE__ \
-                << ": " << cudaGetErrorString(err_) << std::endl;       \
-      exit(EXIT_FAILURE);                                               \
-    }                                                                   \
-  }
+#include "lab.cuh"
 
 // ==========================================================================
 // CUDA Kernels for Epsilon Sort
@@ -260,14 +247,15 @@ void printVector(const std::string& title, const std::vector<double>& vec,
   std::cout << std::endl;
 }
 
-int main() {
-  const int N = 1024 * 1024;
+int main(int argc, char** argv) {
+  lab::Args args(argc, argv);
+  const int N = static_cast<int>(args.get_int("n", args.quick() ? 4099 : 1024 * 1024));
   double epsilon = 0.25;
+  lab::print_device();
 
   // --- Generate Random Data ---
   std::vector<double> h_numbers(N);
-  std::random_device rd;
-  std::mt19937 gen(rd());
+  std::mt19937 gen(17);  // Fixed seed so every run sees the same input
   // Generate random positive numbers, e.g., between 1.0 and 1000.0
   std::uniform_real_distribution<> distr(1.0, 1000.0);
 
@@ -276,6 +264,7 @@ int main() {
   }
 
   std::cout << "Generated " << N << " random numbers." << std::endl;
+  std::vector<double> h_original = h_numbers;
 
   // --- Run Epsilon Sort ---
   epsilonSortGPU_Manual(h_numbers, epsilon);
@@ -289,11 +278,18 @@ int main() {
               /*limit*/ 20);
 
   // --- Validate the Result ---
-  if (validateEpsilonSort_Optimized(h_numbers, epsilon)) {
+  // The output must be epsilon-sorted and must be a permutation of the input
+  // (scatter bugs can drop or duplicate elements without breaking the order).
+  bool pass = validateEpsilonSort_Optimized(h_numbers, epsilon);
+  std::vector<double> sorted_output = h_numbers;
+  std::sort(sorted_output.begin(), sorted_output.end());
+  std::sort(h_original.begin(), h_original.end());
+  pass = lab::check_equal("same elements", sorted_output, h_original) && pass;
+  if (pass) {
     std::cout << "Validation successful!" << std::endl;
   } else {
     std::cout << "Validation FAILED!" << std::endl;
   }
 
-  return 0;
+  return lab::finish(pass);
 }

@@ -27,6 +27,8 @@
 #include <map>
 #include <vector>
 
+#include "lab.cuh"
+
 /**
  * @brief Sorts a vector of positive doubles using the Geometric Bucketing
  * method (Epsilon Sort).
@@ -207,7 +209,8 @@ int main() {
   printVector("Host: Epsilon-sorted vector: ", h_sorted_numbers);
 
   // 4. Validate the result on the CPU
-  bool is_valid = validateEpsilonSort(h_sorted_numbers, epsilon);
+  bool is_valid = validateEpsilonSort(h_sorted_numbers, epsilon) &&
+                  h_sorted_numbers.size() == h_numbers.size();
   if (is_valid) {
     std::cout
         << "Validation successful: The vector is correctly epsilon-sorted."
@@ -218,5 +221,5 @@ int main() {
         << std::endl;
   }
 
-  return 0;
+  return lab::finish(is_valid);
 }

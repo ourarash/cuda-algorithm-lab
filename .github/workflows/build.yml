@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile:
+    # GitHub-hosted runners have no GPU, so this job only compiles every
+    # example. Run `make test` and `make sanitize` on a machine with an
+    # NVIDIA GPU to execute and validate them.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda: ["12.8.1", "13.3.1"]
+    container: nvidia/cuda:${{ matrix.cuda }}-devel-ubuntu24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CMake and Ninja
+        run: apt-get update && apt-get install -y --no-install-recommends cmake ninja-build
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_CUDA_ARCHITECTURES="75;80;90"
+      - name: Build
+        run: cmake --build build
+
+  visualizations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject scripts from compromised hosts
+        # polyfill.io was taken over in 2024 and served malicious JavaScript.
+        run: |
+          if grep -rn --include='*.html' 'polyfill\.io' .; then
+            echo "Remove the polyfill.io script tags listed above."
+            exit 1
+          fi

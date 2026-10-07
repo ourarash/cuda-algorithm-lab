@@ -13,22 +13,11 @@
  * - Validate the result against std::sort on the CPU.
  */
 #include <algorithm>
-#include <cmath>
-#include <iostream>
+#include <cstdio>
+#include <random>
 #include <vector>
 
-// ===================================================================================
-// CUDA Error Checking Macro
-// ===================================================================================
-#define CHECK_CUDA(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA Error in %s at line %d: %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(err));                                        \
-      exit(EXIT_FAILURE);                                                      \
-    }                                                                          \
-  } while (0)
+#include "lab.cuh"
 
 // ===================================================================================
 // Algorithm Constants
@@ -189,19 +178,19 @@ void parallelMergeSort(float *h_data, unsigned int N) {
 
   // 1. Allocate memory on the device
   float *d_src, *d_dst;
-  CHECK_CUDA(cudaMalloc(&d_src, N * sizeof(float)));
-  CHECK_CUDA(cudaMalloc(&d_dst, N * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_src, N * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dst, N * sizeof(float)));
 
   // 2. Copy data from host to device source buffer
-  CHECK_CUDA(
+  CUDA_CHECK(
       cudaMemcpy(d_src, h_data, N * sizeof(float), cudaMemcpyHostToDevice));
 
   // 3. LAUNCH INITIAL SORT KERNEL
   // This creates the initial sorted chunks of size ELEMENTS_PER_BLOCK
   unsigned int numBlocks = (N + ELEMENTS_PER_BLOCK - 1) / ELEMENTS_PER_BLOCK;
   initialSortKernel<<<numBlocks, BLOCK_SIZE>>>(d_src, N);
-  CHECK_CUDA(cudaGetLastError());
-  CHECK_CUDA(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
 
   // 4. LAUNCH MERGE KERNEL IN A LOOP (Iterative Merging)
   for (unsigned int width = ELEMENTS_PER_BLOCK; width < N; width *= 2) {
@@ -209,44 +198,38 @@ void parallelMergeSort(float *h_data, unsigned int N) {
     // `2*width`. The `d_src` and `d_dst` pointers are swapped each pass
     // (ping-pong buffering).
 
-    numBlocks = (N + ELEMENTS_PER_BLOCK - 1) / ELEMENTS_PER_BLOCK;
-
     // This loop launches kernels to merge pairs of chunks.
     for (unsigned int i = 0; i < N; i += 2 * width) {
-      unsigned int m = width;
-      unsigned int n = width;
-
-      // Boundary checks for the last chunks
       if (i + width >= N) {
-        m = 0;
-        n = 0;  // No second chunk to merge with
-      } else if (i + 2 * width > N) {
-        n = N - (i + width);  // The second chunk is smaller than `width`
+        // Only one run is left at the end, with no partner to merge with. It
+        // is already sorted, but it must still be copied into the destination
+        // buffer: after the swap below, d_dst becomes the source of the next
+        // pass, and without this copy the run would be replaced by stale data
+        // from an earlier pass.
+        CUDA_CHECK(cudaMemcpy(d_dst + i, d_src + i, (N - i) * sizeof(float),
+                              cudaMemcpyDeviceToDevice));
+        continue;
       }
 
-      if (m > 0 || n > 0) {
-        unsigned int merge_size = m + n;
-        unsigned int merge_num_blocks =
-            (merge_size + ELEMENTS_PER_BLOCK - 1) / ELEMENTS_PER_BLOCK;
+      unsigned int m = width;
+      // The second chunk is shorter than `width` when it reaches the end.
+      unsigned int n = std::min(width, N - (i + width));
 
-        // Launch kernel to merge chunks from SRC and write to DST
-        mergeKernel<<<merge_num_blocks, BLOCK_SIZE>>>(
-            d_src + i,          // Pointer to first chunk in source
-            d_src + i + width,  // Pointer to second chunk in source
-            d_dst + i,          // Output pointer in destination
-            m,                  // Size of first chunk
-            n                   // Size of second chunk
-        );
-      }
+      unsigned int merge_size = m + n;
+      unsigned int merge_num_blocks =
+          (merge_size + ELEMENTS_PER_BLOCK - 1) / ELEMENTS_PER_BLOCK;
+
+      // Launch kernel to merge chunks from SRC and write to DST
+      mergeKernel<<<merge_num_blocks, BLOCK_SIZE>>>(
+          d_src + i,          // Pointer to first chunk in source
+          d_src + i + width,  // Pointer to second chunk in source
+          d_dst + i,          // Output pointer in destination
+          m,                  // Size of first chunk
+          n                   // Size of second chunk
+      );
     }
-    CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaDeviceSynchronize());
-
-    // After merging pairs from src->dst, copy any remaining unmerged chunk at
-    // the end This logic is simplified by just swapping pointers and letting
-    // the next pass handle it. A full copy `cudaMemcpy(d_dst, d_src, ...)`
-    // before the loop is a simpler but less performant way to handle
-    // odd-numbered chunks. The current approach is more efficient.
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Swap pointers for the next pass (ping-pong)
     float *temp = d_src;
@@ -256,67 +239,40 @@ void parallelMergeSort(float *h_data, unsigned int N) {
 
   // 5. Copy the final sorted data from device back to host
   // The final, sorted data is in d_src (due to the last swap)
-  CHECK_CUDA(
+  CUDA_CHECK(
       cudaMemcpy(h_data, d_src, N * sizeof(float), cudaMemcpyDeviceToHost));
 
   // 6. Free device memory
-  CHECK_CUDA(cudaFree(d_src));
-  CHECK_CUDA(cudaFree(d_dst));
+  CUDA_CHECK(cudaFree(d_src));
+  CUDA_CHECK(cudaFree(d_dst));
 }
 
 // ===================================================================================
 // Main Function
 // ===================================================================================
-int main() {
-  const unsigned int N = 1 << 20;  // Sort 1,048,576 elements
+int main(int argc, char **argv) {
+  lab::Args args(argc, argv);
+  // Neither size is a multiple of ELEMENTS_PER_BLOCK, and both produce
+  // passes where the run count is odd, so the trailing-run copy is exercised.
+  const unsigned int N = static_cast<unsigned int>(
+      args.get_int("n", args.quick() ? 10 * 1024 + 17 : 1000000));
+
+  lab::print_device();
+  printf("Sorting %u elements...\n", N);
+
+  // Random values from a small range, so the input has many duplicates and
+  // the merge's tie handling is tested too.
+  std::mt19937 gen(5);
+  std::uniform_int_distribution<int> dist(0, 999);
   std::vector<float> h_data(N);
-  std::vector<float> h_data_cpu_sorted(N);  // For verification
-
-  // Initialize data with a reverse-sorted array
-  for (unsigned int i = 0; i < N; ++i) {
-    h_data[i] = static_cast<float>(N - i);
+  for (float &value : h_data) {
+    value = static_cast<float>(dist(gen));
   }
-  // Create a copy of the original data for CPU sorting
-  h_data_cpu_sorted = h_data;
+  std::vector<float> expected = h_data;
+  std::sort(expected.begin(), expected.end());
 
-  std::cout << "Sorting " << N << " elements..." << std::endl;
-  std::cout << "First 10 unsorted elements: ";
-  for (int i = 0; i < 10; ++i) {
-    std::cout << h_data[i] << " ";
-  }
-  std::cout << "..." << std::endl;
-
-  // Run the parallel sort on the GPU
   parallelMergeSort(h_data.data(), N);
-  std::cout << "GPU sort complete." << std::endl;
 
-  // Sort the reference data on the CPU for comparison
-  std::cout << "Sorting reference data on CPU for verification..." << std::endl;
-  std::sort(h_data_cpu_sorted.begin(), h_data_cpu_sorted.end());
-  std::cout << "CPU sort complete." << std::endl;
-
-  std::cout << "First 10 GPU-sorted elements:   ";
-  for (int i = 0; i < 10; ++i) {
-    std::cout << h_data[i] << " ";
-  }
-  std::cout << "..." << std::endl;
-
-  // Verification against CPU sort
-  std::cout << "Verifying GPU sort against CPU sort..." << std::endl;
-  bool success = true;
-  for (unsigned int i = 0; i < N; ++i) {
-    if (h_data[i] != h_data_cpu_sorted[i]) {
-      std::cerr << "Verification FAILED at index " << i << ": "
-                << "GPU sorted value " << h_data[i] << " != CPU sorted value "
-                << h_data_cpu_sorted[i] << std::endl;
-      success = false;
-      break;
-    }
-  }
-
-  if (success) {
-    std::cout << "Verification PASSED!" << std::endl;
-  }
-
-  return 0;
+  const bool pass = lab::check_equal("sorted output", h_data, expected);
+  return lab::finish(pass);
 }

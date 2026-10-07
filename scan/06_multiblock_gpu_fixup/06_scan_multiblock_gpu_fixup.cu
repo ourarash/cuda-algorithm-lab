@@ -17,55 +17,34 @@
  * - Once the block sums are scanned, block i adds the scanned total of block
  *   i - 1 to every element in its local output.
  *
- * Why this version is the end state:
+ * Why this version is the end state of this folder:
  * - It keeps the entire computation on the GPU.
- * - It works for arrays much larger than a single block.
+ * - It works for arrays much larger than a single block. The default size
+ *   needs two levels of recursion.
+ *
+ * Every recursion level needs scratch arrays for its block sums. They are
+ * allocated once, before any kernel runs: cudaMalloc and cudaFree are slow
+ * and wait for the whole device to go idle, so calling them inside the scan
+ * would dominate its run time.
+ *
+ * The data is double precision so that, over millions of elements, rounding
+ * differences between the GPU and CPU summation orders stay negligible.
  */
-#include <cuda_runtime.h>
-
-#include <algorithm>
-#include <cmath>
-#include <cstdlib>
 #include <cstdio>
-#include <iostream>
-#include <random>
 #include <vector>
 
+#include "lab.cuh"
+
 constexpr int kBlockSize = 1024;
-constexpr int kElementCount = 1 << 20;
 
-#define CHECK_CUDA(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA error in %s at line %d: %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(err));                                        \
-      std::exit(EXIT_FAILURE);                                                 \
-    }                                                                          \
-  } while (0)
-
-template <typename T>
-constexpr T ceil_div(T a, T b) {
-  return (a + b - 1) / b;
-}
-
-void cpu_inclusive_scan(const double* input, double* output, int n) {
-  output[0] = input[0];
-  for (int i = 1; i < n; ++i) {
-    output[i] = output[i - 1] + input[i];
+std::vector<double> cpu_inclusive_scan(const std::vector<double>& input) {
+  std::vector<double> output(input.size());
+  double running = 0.0;
+  for (size_t i = 0; i < input.size(); ++i) {
+    running += input[i];
+    output[i] = running;
   }
-}
-
-bool almost_equal(const double* a, const double* b, int n, double eps = 1e-8) {
-  for (int i = 0; i < n; ++i) {
-    double scale = std::max({1.0, std::fabs(a[i]), std::fabs(b[i])});
-    if (std::fabs(a[i] - b[i]) > eps * scale) {
-      std::cerr << "Mismatch at index " << i << ": GPU=" << b[i]
-                << ", CPU=" << a[i] << '\n';
-      return false;
-    }
-  }
-  return true;
+  return output;
 }
 
 __global__ void block_scan(double* output, double* block_sums,
@@ -110,81 +89,100 @@ __global__ void add_block_offsets(double* output, const double* scanned_sums,
   output[global_index] += scanned_sums[blockIdx.x - 1];
 }
 
-void inclusive_scan_gpu(double* d_output, const double* d_input, int n) {
-  const int num_blocks = ceil_div(n, kBlockSize);
+// Scratch space for every recursion level: level l holds the block sums of
+// the level-l problem and their scan, which is the level-(l+1) output.
+struct ScanWorkspace {
+  std::vector<double*> block_sums;
+  std::vector<double*> scanned_block_sums;
+  double* unused_block_sum = nullptr;  // For the final single-block level.
+};
+
+ScanWorkspace allocate_workspace(int n) {
+  ScanWorkspace ws;
+  for (int count = lab::ceil_div(n, kBlockSize); count > 1;
+       count = lab::ceil_div(count, kBlockSize)) {
+    double* sums = nullptr;
+    double* scanned = nullptr;
+    CUDA_CHECK(cudaMalloc(&sums, count * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&scanned, count * sizeof(double)));
+    ws.block_sums.push_back(sums);
+    ws.scanned_block_sums.push_back(scanned);
+  }
+  CUDA_CHECK(cudaMalloc(&ws.unused_block_sum, sizeof(double)));
+  return ws;
+}
+
+void free_workspace(ScanWorkspace& ws) {
+  for (size_t level = 0; level < ws.block_sums.size(); ++level) {
+    CUDA_CHECK(cudaFree(ws.block_sums[level]));
+    CUDA_CHECK(cudaFree(ws.scanned_block_sums[level]));
+  }
+  CUDA_CHECK(cudaFree(ws.unused_block_sum));
+}
+
+void inclusive_scan_gpu(double* d_output, const double* d_input, int n,
+                        const ScanWorkspace& ws, int level = 0) {
+  const int num_blocks = lab::ceil_div(n, kBlockSize);
 
   if (num_blocks == 1) {
-    double* d_single_block_sum = nullptr;
-    CHECK_CUDA(cudaMalloc(&d_single_block_sum, sizeof(double)));
-    block_scan<<<1, kBlockSize>>>(d_output, d_single_block_sum, d_input, n);
-    CHECK_CUDA(cudaGetLastError());
-    CHECK_CUDA(cudaFree(d_single_block_sum));
+    block_scan<<<1, kBlockSize>>>(d_output, ws.unused_block_sum, d_input, n);
+    CUDA_CHECK_LAUNCH();
     return;
   }
 
-  double* d_block_sums = nullptr;
-  double* d_scanned_block_sums = nullptr;
-  CHECK_CUDA(cudaMalloc(&d_block_sums, num_blocks * sizeof(double)));
-  CHECK_CUDA(cudaMalloc(&d_scanned_block_sums, num_blocks * sizeof(double)));
+  double* d_block_sums = ws.block_sums[level];
+  double* d_scanned_block_sums = ws.scanned_block_sums[level];
 
   block_scan<<<num_blocks, kBlockSize>>>(d_output, d_block_sums, d_input, n);
-  CHECK_CUDA(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 
-  inclusive_scan_gpu(d_scanned_block_sums, d_block_sums, num_blocks);
+  inclusive_scan_gpu(d_scanned_block_sums, d_block_sums, num_blocks, ws,
+                     level + 1);
 
   add_block_offsets<<<num_blocks, kBlockSize>>>(d_output, d_scanned_block_sums,
                                                 n);
-  CHECK_CUDA(cudaGetLastError());
-
-  CHECK_CUDA(cudaFree(d_block_sums));
-  CHECK_CUDA(cudaFree(d_scanned_block_sums));
+  CUDA_CHECK_LAUNCH();
 }
 
-int main() {
+int main(int argc, char** argv) {
   static_assert(kBlockSize <= 1024, "CUDA thread blocks cannot exceed 1024.");
+  lab::Args args(argc, argv);
+  const int n =
+      static_cast<int>(args.get_int("n", args.quick() ? 100003 : (1 << 21) + 12345));
 
-  cudaDeviceProp prop;
-  int device = 0;
-  CHECK_CUDA(cudaGetDevice(&device));
-  CHECK_CUDA(cudaGetDeviceProperties(&prop, device));
-  std::cout << "Running on GPU: " << prop.name << " (Compute Capability "
-            << prop.major << "." << prop.minor << ")\n";
+  lab::print_device();
+  ScanWorkspace ws = allocate_workspace(n);
+  printf("Inclusive scan of %d doubles (%zu recursion levels)\n", n,
+         ws.block_sums.size() + 1);
 
-  std::vector<double> h_input(kElementCount);
-  std::vector<double> h_output(kElementCount);
-  std::vector<double> h_reference(kElementCount);
-
-  std::mt19937 gen(37);
-  std::uniform_real_distribution<double> dist(1.0, 1.1);
-  for (double& value : h_input) {
-    value = dist(gen);
-  }
+  const std::vector<double> h_input = lab::random_uniform<double>(n, 1.0, 1.1, 37);
+  std::vector<double> h_output(n);
 
   double* d_input = nullptr;
   double* d_output = nullptr;
-  CHECK_CUDA(cudaMalloc(&d_input, kElementCount * sizeof(double)));
-  CHECK_CUDA(cudaMalloc(&d_output, kElementCount * sizeof(double)));
-  CHECK_CUDA(cudaMemcpy(d_input, h_input.data(),
-                        kElementCount * sizeof(double),
+  CUDA_CHECK(cudaMalloc(&d_input, n * sizeof(double)));
+  CUDA_CHECK(cudaMalloc(&d_output, n * sizeof(double)));
+  CUDA_CHECK(cudaMemcpy(d_input, h_input.data(), n * sizeof(double),
                         cudaMemcpyHostToDevice));
 
-  inclusive_scan_gpu(d_output, d_input, kElementCount);
-  CHECK_CUDA(cudaGetLastError());
-  CHECK_CUDA(cudaDeviceSynchronize());
-
-  CHECK_CUDA(cudaMemcpy(h_output.data(), d_output,
-                        kElementCount * sizeof(double),
+  inclusive_scan_gpu(d_output, d_input, n, ws);
+  CUDA_CHECK(cudaMemcpy(h_output.data(), d_output, n * sizeof(double),
                         cudaMemcpyDeviceToHost));
 
-  cpu_inclusive_scan(h_input.data(), h_reference.data(), kElementCount);
+  const std::vector<double> expected = cpu_inclusive_scan(h_input);
+  printf("Last GPU output: %.6f\n", h_output.back());
+  printf("Last CPU output: %.6f\n", expected.back());
+  const bool pass = lab::check_close("scan", h_output, expected, 1e-9, 1e-9);
 
-  std::cout << "Last GPU output: " << h_output.back() << '\n';
-  std::cout << "Last CPU output: " << h_reference.back() << '\n';
-  std::cout << (almost_equal(h_reference.data(), h_output.data(), kElementCount)
-                    ? "CPU and GPU results match.\n"
-                    : "CPU and GPU results differ.\n");
+  // Effective bandwidth: the minimum traffic is one read and one write of
+  // the array. This implementation reads and writes the output a second time
+  // in the offset fixup, which is what single-pass scans eliminate.
+  const float ms =
+      lab::time_ms([&] { inclusive_scan_gpu(d_output, d_input, n, ws); });
+  lab::report("recursive multi-block scan", ms, 0, 2.0 * n * sizeof(double));
 
-  CHECK_CUDA(cudaFree(d_input));
-  CHECK_CUDA(cudaFree(d_output));
-  return 0;
+  free_workspace(ws);
+  CUDA_CHECK(cudaFree(d_input));
+  CUDA_CHECK(cudaFree(d_output));
+  return lab::finish(pass);
 }

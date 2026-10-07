@@ -13,38 +13,16 @@
  *   using atomic increments on the scanned offsets.
  * - Compare against std::sort on the CPU.
  */
-#include <cuda_runtime.h>
 #include <stdio.h>
 
 #include <algorithm>
-#include <cmath>
-#include <cstdlib>
-#include <iostream>
 #include <random>
+#include <vector>
+
+#include "lab.cuh"
 
 #define BLOCK_SIZE 1024  // Number of threads per block
-#define MAX_VALUE 100    // Maximum value for the input numbers
-
-// Error checking macro for CUDA calls
-#define CUDA_CHECK(ans) \
-  { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line,
-                      bool abort = true) {
-  if (code != cudaSuccess) {
-    std::cerr << "CUDA Error: " << cudaGetErrorString(code) << " at " << file
-              << ":" << line << std::endl;
-    if (abort) exit(code);
-  }
-}
-
-/**
- * @brief Utility function to calculate ceiling division.
- * Used to determine the number of blocks needed for a kernel launch.
- */
-template <typename T>
-constexpr inline T ceil_div(T a, T b) {
-  return (a + b - 1) / b;
-}
+#define MAX_VALUE 100    // Values are in [0, MAX_VALUE)
 
 /**
  * @brief GPU Kernel: Calculates a histogram of the input data.
@@ -77,6 +55,10 @@ __global__ void placement_kernel(int *input, int *prefix, int *output, int N) {
     // Atomically get the correct position from the prefix sum array
     // and increment it for the next thread that has the same element value.
     int place = atomicAdd(&prefix[element], 1);
+    // Note: threads with equal values claim slots in whatever order their
+    // atomics happen, so this sort is not stable. That is fine for plain
+    // integers; sorting key-value pairs stably needs a different placement
+    // step (for example, a per-block scan as in radix sort).
     output[place] = element;
   }
 }
@@ -95,9 +77,11 @@ void exclusive_scan_host(int *hist, int *prefix, int range) {
   }
 }
 
-int main() {
-  const int N = 1024 * 16;  // Using a larger N for more robust testing
-  const int grid_size = ceil_div(N, BLOCK_SIZE);
+int main(int argc, char **argv) {
+  lab::Args args(argc, argv);
+  const int N = static_cast<int>(args.get_int("n", args.quick() ? 4099 : 1 << 20));
+  const int grid_size = lab::ceil_div(N, BLOCK_SIZE);
+  lab::print_device();
 
   // --- 1. Allocate Memory ---
   // Allocate all necessary memory on both the host (CPU) and device (GPU)
@@ -114,8 +98,7 @@ int main() {
 
   // --- 2. Initialize Data ---
   // Create random input data on the host
-  std::random_device rd;
-  std::mt19937 gen(rd());
+  std::mt19937 gen(3);  // Fixed seed so every run sees the same input
   std::uniform_int_distribution<int> dis(0, MAX_VALUE - 1);
   for (int i = 0; i < N; i++) {
     h_input[i] = dis(gen);
@@ -129,7 +112,7 @@ int main() {
   // First, ensure the histogram memory on the device is zeroed out
   CUDA_CHECK(cudaMemset(d_histogram, 0, MAX_VALUE * sizeof(int)));
   histogram_kernel<<<grid_size, BLOCK_SIZE>>>(d_input, d_histogram, N);
-  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 
   // --- 4. CPU Exclusive Scan ---
   // Copy the histogram from the device to the host to perform the scan
@@ -148,7 +131,7 @@ int main() {
   // Use the prefix sum to place elements into their final sorted positions
   placement_kernel<<<grid_size, BLOCK_SIZE>>>(d_input, d_prefix_sum,
                                               d_output_place, N);
-  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 
   // Block until the device has completed all preceding tasks
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -171,11 +154,6 @@ int main() {
       break;
     }
   }
-  if (match) {
-    printf("✅ Results match!\n");
-  } else {
-    printf("❌ Results do not match!\n");
-  }
 
   // --- 7. Free Memory ---
   CUDA_CHECK(cudaFree(d_input));
@@ -187,5 +165,5 @@ int main() {
   free(h_histogram);
   free(h_prefix_sum);
 
-  return 0;
+  return lab::finish(match);
 }

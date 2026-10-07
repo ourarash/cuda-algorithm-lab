@@ -10,50 +10,44 @@
  * - Cooperatively load one tile of A and one tile of B into shared memory.
  * - Reuse those tiles for many multiply-accumulate operations before loading
  *   the next K tile.
- * - Pad the B tile by one column to avoid shared-memory bank conflicts.
+ * - Zero-fill tile elements that fall outside the matrices, so any M, N, and
+ *   K work, including a partial last tile along K.
+ *
+ * The host-side driver (inputs, CPU reference, validation, timing) lives in
+ * ../gemm_harness.cuh and is shared by every stage.
  */
-#include <cmath>
-#include <cstdlib>
-#include <cuda_runtime.h>
-#include <iostream>
-#include <vector>
+#include "../gemm_harness.cuh"
 
-#define CHECK(call)                                                            \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "     \
-                << cudaGetErrorString(err) << std::endl;                       \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
-
-#define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
-
-#define TILE_SIZE 32 // Tile size for shared memory
+#define TILE_SIZE 32  // Tile size for shared memory
 
 /**
  * 2. Shared Memory Tiling Approach
- * This kernel uses Shared Memory to drastically reduce global memory accesses.
+ * This kernel uses shared memory to drastically reduce global memory accesses.
  * Each thread block is assigned to one tile of the output matrix C, and each
  * thread in that block computes one element within that C tile.
  * Threads within the block cooperatively load the corresponding tiles of A and
- * B into ultra-fast shared memory, reuse them for their dot product
- * calculations, and pad the B tile by 1 column to avoid shared memory bank
- * conflicts.
+ * B into fast on-chip shared memory and reuse them for their dot products.
+ * Each element loaded from global memory is now used TILE_SIZE times.
  */
 __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
                              const float *B, float beta, float *C) {
-  // Allocate shared memory for tiles of A and B.
-  // We only pad tileB because of how the compute loop reads the two tiles:
-  //   partialSum += tileA[threadIdx.y][k] * tileB[k][threadIdx.x];
-  // For tileA, a warp reads across a row at fixed k, which is already a
-  // row-major, conflict-friendly access pattern. For tileB, threads read down
-  // a logical column as k changes. Without padding, that column access can map
-  // many threads onto the same shared-memory bank. Adding +1 to tileB's stride
-  // shifts each row start into a different bank, breaking that conflict pattern.
+  // Shared-memory tiles of A and B. Neither needs padding, because no warp
+  // ever reads two different addresses in the same bank at the same time.
+  // A warp is 32 threads with consecutive threadIdx.x and the same
+  // threadIdx.y, and bank conflicts only happen between threads of one warp
+  // within one instruction:
+  // - Stores tileA[ty][tx] and tileB[ty][tx]: 32 consecutive words, so 32
+  //   different banks.
+  // - Read tileA[ty][k]: every thread reads the same word, which is a
+  //   broadcast (one transaction, no conflict).
+  // - Read tileB[k][tx]: 32 consecutive words of one row, so 32 different
+  //   banks.
+  // It is true that over the k loop each thread walks down a column of tileB,
+  // but those reads happen in different instructions, so they cannot
+  // conflict. Padding matters when a single warp reads down a column at once;
+  // see matrix_transpose/ for that case.
   __shared__ float tileA[TILE_SIZE][TILE_SIZE];
-  __shared__ float tileB[TILE_SIZE][TILE_SIZE + 1];
+  __shared__ float tileB[TILE_SIZE][TILE_SIZE];
 
   // Global row and column index in the output matrix C
   int globalRow = blockIdx.y * TILE_SIZE + threadIdx.y;
@@ -66,8 +60,11 @@ __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
   // that tile requires accumulating products across the full K dimension.
   // In each iteration, the block loads one tile of A and one tile of B into
   // shared memory, computes this tile's partial contribution to C, and then
-  // moves to the next K tile.
-  for (int tileIdx = 0; tileIdx < K / TILE_SIZE; tileIdx++) {
+  // moves to the next K tile. Rounding the tile count up (instead of K /
+  // TILE_SIZE) keeps the partial last tile when K is not a multiple of
+  // TILE_SIZE; its missing elements are loaded as zeros below.
+  const int numTiles = lab::ceil_div(K, TILE_SIZE);
+  for (int tileIdx = 0; tileIdx < numTiles; tileIdx++) {
     // Each thread loads one element of the current A tile.
     int aRow = globalRow;
     int aCol = tileIdx * TILE_SIZE + threadIdx.x;
@@ -91,7 +88,8 @@ __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
       tileB[threadIdx.y][threadIdx.x] = 0.0f;
     }
 
-    // Wait for all threads in the block to finish loading their elements into shared memory
+    // Wait for all threads in the block to finish loading their elements into
+    // shared memory
     __syncthreads();
 
     // Each thread builds one tile-local dot product: over the full k loop, it
@@ -114,89 +112,14 @@ __global__ void sgemm_shared(int M, int N, int K, float alpha, const float *A,
   }
 }
 
-void cpu_gemm(int M, int N, int K, float alpha, const float *A, const float *B,
-              float beta, float *C) {
-  for (int x = 0; x < M; ++x)
-    for (int y = 0; y < N; ++y) {
-      float tmp = 0.0f;
-      for (int i = 0; i < K; ++i)
-        tmp += A[x * K + i] * B[i * N + y];
-      C[x * N + y] = alpha * tmp + beta * C[x * N + y];
-    }
+void launch_sgemm_shared(int M, int N, int K, float alpha, const float *A,
+                         const float *B, float beta, float *C) {
+  dim3 block(TILE_SIZE, TILE_SIZE);
+  dim3 grid(lab::ceil_div(N, TILE_SIZE), lab::ceil_div(M, TILE_SIZE));
+  sgemm_shared<<<grid, block>>>(M, N, K, alpha, A, B, beta, C);
 }
 
-bool nearly_equal(float a, float b, float eps = 1e-4f) {
-  return std::fabs(a - b) < eps;
-}
-
-int main() {
-  const int M = 1024, N = 1024, K = 1024;
-  float alpha = 1.0f, beta = 0.0f;
-
-  std::vector<float> A(M * K), B(K * N), C_cpu(M * N), C_gpu(M * N);
-
-  for (int i = 0; i < M * K; ++i)
-    A[i] = static_cast<float>(i % 13);
-  for (int i = 0; i < K * N; ++i)
-    B[i] = static_cast<float>((i % 7) - 3);
-  for (int i = 0; i < M * N; ++i) {
-    C_cpu[i] = 1.0f;
-    C_gpu[i] = 1.0f;
-  }
-
-  std::cout << "Running CPU validation..." << std::endl;
-  cpu_gemm(M, N, K, alpha, A.data(), B.data(), beta, C_cpu.data());
-
-  float *dA, *dB, *dC;
-  CHECK(cudaMalloc(&dA, A.size() * sizeof(float)));
-  CHECK(cudaMalloc(&dB, B.size() * sizeof(float)));
-  CHECK(cudaMalloc(&dC, C_gpu.size() * sizeof(float)));
-
-  CHECK(cudaMemcpy(dA, A.data(), A.size() * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dB, B.data(), B.size() * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dC, C_gpu.data(), C_gpu.size() * sizeof(float),
-                   cudaMemcpyHostToDevice));
-
-  dim3 blockSize(TILE_SIZE, TILE_SIZE);
-  dim3 gridSize(CEIL_DIV(N, TILE_SIZE), CEIL_DIV(M, TILE_SIZE), 1);
-
-  cudaEvent_t start, stop;
-  CHECK(cudaEventCreate(&start));
-  CHECK(cudaEventCreate(&stop));
-
-  CHECK(cudaEventRecord(start));
-  sgemm_shared<<<gridSize, blockSize>>>(M, N, K, alpha, dA, dB, beta, dC);
-  CHECK(cudaEventRecord(stop));
-
-  CHECK(cudaGetLastError());
-  CHECK(cudaEventSynchronize(stop));
-
-  float ms = 0.0f;
-  CHECK(cudaEventElapsedTime(&ms, start, stop));
-  std::cout << "Kernel Execution Time (Shared Memory): " << ms << " ms\n";
-
-  CHECK(cudaEventDestroy(start));
-  CHECK(cudaEventDestroy(stop));
-
-  CHECK(cudaMemcpy(C_gpu.data(), dC, C_gpu.size() * sizeof(float),
-                   cudaMemcpyDeviceToHost));
-
-  bool pass = true;
-  for (int i = 0; i < M * N; ++i) {
-    if (!nearly_equal(C_cpu[i], C_gpu[i])) {
-      std::cerr << "Mismatch at " << i << ": CPU=" << C_cpu[i]
-                << ", GPU=" << C_gpu[i] << std::endl;
-      pass = false;
-      break;
-    }
-  }
-  if (pass) {
-    std::cout << "Validation PASSED!" << std::endl;
-  }
-
-  CHECK(cudaFree(dA));
-  CHECK(cudaFree(dB));
-  CHECK(cudaFree(dC));
-
-  return 0;
+int main(int argc, char **argv) {
+  return run_gemm<float>("Shared memory", argc, argv, {1024, 1024, 1024},
+                         {257, 129, 95}, launch_sgemm_shared);
 }

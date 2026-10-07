@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <vector>
 
 // Thrust library headers
@@ -32,6 +33,8 @@
 #include <thrust/host_vector.h>
 #include <thrust/iterator/counting_iterator.h>
 #include <thrust/reduce.h>
+
+#include "lab.cuh"
 
 // Functor to increment the count in the 'present' array using atomic
 // operations.
@@ -152,5 +155,13 @@ int main() {
     std::cout << std::endl;
   }
 
-  return 0;
+  // Check against the C++ standard library, which needs sorted inputs.
+  std::vector<int> sorted_A = h_A, sorted_B = h_B, expected;
+  std::sort(sorted_A.begin(), sorted_A.end());
+  std::sort(sorted_B.begin(), sorted_B.end());
+  std::set_symmetric_difference(sorted_A.begin(), sorted_A.end(),
+                                sorted_B.begin(), sorted_B.end(),
+                                std::back_inserter(expected));
+  const std::vector<int> got(h_xor.begin(), h_xor.end());
+  return lab::finish(lab::check_equal("A XOR B", got, expected));
 }

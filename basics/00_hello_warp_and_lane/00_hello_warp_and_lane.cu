@@ -8,43 +8,40 @@
  * High-Level Algorithm:
  * - Launch a small block of threads.
  * - For each thread, compute:
- *   - warp_id = threadIdx.x / 32
- *   - lane_id = threadIdx.x % 32
+ *   - warp_id = threadIdx.x / warpSize
+ *   - lane_id = threadIdx.x % warpSize
  * - Print those ids so the mapping from threads to warps is visible.
+ * - Ask the occupancy API how many such blocks fit on one SM.
  */
-#include <cuda_runtime.h>
-#include <stdio.h>
+#include <cstdio>
+
+#include "lab.cuh"
 
 __global__ void hello_from_gpu() {
-  int warp_id = threadIdx.x / 32; // Each warp contains 32 threads.
-  int lane_id = threadIdx.x % 32; // Position within the warp.
-  printf("Warp ID: %d, Lane ID: %d\n", warp_id, lane_id);
+  int warp_id = threadIdx.x / warpSize;  // warpSize is 32 on all NVIDIA GPUs.
+  int lane_id = threadIdx.x % warpSize;  // Position within the warp.
+  printf("Thread %2d -> warp %d, lane %2d\n", threadIdx.x, warp_id, lane_id);
 }
 
 int main() {
-  cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);
+  lab::print_device();
 
-  int blockSize = 256; // define block size
-  int numBlocksPerSM = 0;
+  const int block_size = 64;  // Two warps.
 
-  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSM, hello_from_gpu,
-                                                blockSize,
-                                                0 // dynamic shared memory
-  );
+  // Occupancy: how many blocks of this kernel, at this block size, can be
+  // resident on one SM at the same time. The answer depends on the kernel's
+  // register and shared-memory use as well as the hardware limits.
+  int blocks_per_sm = 0;
+  CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &blocks_per_sm, hello_from_gpu, block_size,
+      /*dynamicSMemSize=*/0));
+  printf("Resident blocks per SM for this kernel at %d threads/block: %d\n",
+         block_size, blocks_per_sm);
 
-  printf("Max threads per block: %d\n", prop.maxThreadsPerBlock);
-  printf("Max blocks per SM: %d\n", numBlocksPerSM);
+  hello_from_gpu<<<1, block_size>>>();
+  CUDA_CHECK_LAUNCH();
 
-  hello_from_gpu<<<1, 64>>>();
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess) {
-    printf("CUDA error: %s\n", cudaGetErrorString(err));
-    return -1;
-  }
-
-  // Wait for GPU to finish before continuing
-  cudaDeviceSynchronize();
-
+  // Wait for the GPU to finish so its printf output is flushed.
+  CUDA_CHECK(cudaDeviceSynchronize());
   return 0;
 }

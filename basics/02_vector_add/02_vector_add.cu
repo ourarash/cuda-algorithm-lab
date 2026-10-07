@@ -3,87 +3,72 @@
  *
  * Intention:
  * This is the classic first CUDA program: add two vectors elementwise on the
- * GPU and compare the result with an expected value.
+ * GPU, check every element, and measure the achieved memory bandwidth.
  *
  * High-Level Algorithm:
  * - Allocate host and device buffers for A, B, and C.
  * - Copy A and B to the GPU.
  * - Launch one thread per element so each thread computes C[i] = A[i] + B[i].
- * - Copy C back to the host and print timing plus a sample result.
+ * - Copy C back, compare it with a CPU result, and report GB/s.
+ *
+ * Why GB/s:
+ * Vector add does one addition per 12 bytes of memory traffic, so it is
+ * limited by DRAM bandwidth, not arithmetic. Comparing the achieved GB/s with
+ * the GPU's peak bandwidth tells you how close to optimal the kernel is.
  */
-#include <cuda_runtime.h>
-#include <iostream>
-#include <stdio.h>
+#include <cstdio>
+#include <vector>
 
-using namespace std;
+#include "lab.cuh"
 
-__global__ void vector_add(const float *a, const float *b, float *c, int N) {
+__global__ void vector_add(const float *a, const float *b, float *c, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < N)
+  if (i < n) {
     c[i] = a[i] + b[i];
+  }
 }
 
-int main() {
-  cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);
-  printf("Max threads per SM: %d\n", prop.maxThreadsPerMultiProcessor);
-  printf("Max warps per SM: %d\n", prop.maxThreadsPerMultiProcessor / 32);
+int main(int argc, char **argv) {
+  lab::Args args(argc, argv);
+  const int n = static_cast<int>(args.get_int("n", args.quick() ? 100003 : 1 << 24));
+  const size_t bytes = static_cast<size_t>(n) * sizeof(float);
 
-  const int N = 1 << 20; // 1 million elements
+  lab::print_device();
+  printf("Vector add of %d elements\n", n);
 
-  size_t size = N * sizeof(float);
-
-  float *h_a = (float *)malloc(size);
-  float *h_b = (float *)malloc(size);
-  float *h_c = (float *)malloc(size);
-
-  for (int i = 0; i < N; ++i) {
-    h_a[i] = 1.0f;
-    h_b[i] = 2.0f;
-  }
+  std::vector<float> h_a = lab::random_uniform<float>(n, -1.0f, 1.0f, 1);
+  std::vector<float> h_b = lab::random_uniform<float>(n, -1.0f, 1.0f, 2);
+  std::vector<float> h_c(n);
 
   float *d_a, *d_b, *d_c;
-  cudaMalloc(&d_a, size);
-  cudaMalloc(&d_b, size);
-  cudaMalloc(&d_c, size);
+  CUDA_CHECK(cudaMalloc(&d_a, bytes));
+  CUDA_CHECK(cudaMalloc(&d_b, bytes));
+  CUDA_CHECK(cudaMalloc(&d_c, bytes));
+  CUDA_CHECK(cudaMemcpy(d_a, h_a.data(), bytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_b, h_b.data(), bytes, cudaMemcpyHostToDevice));
 
-  cudaMemcpy(d_a, h_a, size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_b, h_b, size, cudaMemcpyHostToDevice);
+  const int block_size = 256;
+  // Ceiling division: enough blocks to cover every element.
+  const int grid_size = lab::ceil_div(n, block_size);
+  printf("Grid: %d blocks x %d threads\n", grid_size, block_size);
 
-  dim3 blockSize(1024);
-  // Ceiling division to calculate the number of blocks needed
-  // ceil(a/b) = (a + b - 1) / b (for positive integers)
-  dim3 gridSize((N + blockSize.x - 1) / blockSize.x);
+  vector_add<<<grid_size, block_size>>>(d_a, d_b, d_c, n);
+  CUDA_CHECK_LAUNCH();
+  CUDA_CHECK(cudaMemcpy(h_c.data(), d_c, bytes, cudaMemcpyDeviceToHost));
 
-  std::cout << "Grid size: " << gridSize.x << ", Block size: " << blockSize.x
-            << std::endl;
+  std::vector<float> expected(n);
+  for (int i = 0; i < n; ++i) {
+    expected[i] = h_a[i] + h_b[i];
+  }
+  // Each GPU addition is a single IEEE float add, so the result is exact.
+  const bool pass = lab::check_equal("c", h_c, expected);
 
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
+  const float ms = lab::time_ms(
+      [&] { vector_add<<<grid_size, block_size>>>(d_a, d_b, d_c, n); });
+  lab::report("vector_add", ms, /*flops=*/n, /*bytes=*/3.0 * bytes);
 
-  cudaEventRecord(start);
-  vector_add<<<gridSize, blockSize>>>(d_a, d_b, d_c, N);
-  cudaEventRecord(stop);
-  cudaMemcpy(h_c, d_c, size, cudaMemcpyDeviceToHost);
-
-  cudaError_t err = cudaGetLastError();
-  if (err != cudaSuccess)
-    std::cerr << "CUDA kernel launch error: " << cudaGetErrorString(err) << "\n";
-  cudaDeviceSynchronize(); // Ensure the kernel has finished before timing/reporting.
-
-  float milliseconds = 0;
-  cudaEventElapsedTime(&milliseconds, start, stop);
-  printf("Time taken: %f ms\n", milliseconds);
-
-  printf("Done. Sample output: c[N-1] = %f\n", h_c[N - 1]);
-
-  cudaFree(d_a);
-  cudaFree(d_b);
-  cudaFree(d_c);
-  free(h_a);
-  free(h_b);
-  free(h_c);
-
-  return 0;
+  CUDA_CHECK(cudaFree(d_a));
+  CUDA_CHECK(cudaFree(d_b));
+  CUDA_CHECK(cudaFree(d_c));
+  return lab::finish(pass);
 }

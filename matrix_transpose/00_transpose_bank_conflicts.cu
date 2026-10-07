@@ -11,23 +11,10 @@
  * - Write the transposed tile back to global memory with coalesced writes.
  * - Pad the shared tile to avoid bank conflicts during the transposed read.
  */
-#include <cmath>
-#include <cstdlib>
-#include <cuda_runtime.h>
-#include <iostream>
+#include <cstdio>
 #include <vector>
 
-#define CHECK(call)                                                            \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "     \
-                << cudaGetErrorString(err) << std::endl;                       \
-      std::exit(1);                                                            \
-    }                                                                          \
-  } while (0)
-
-#define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
+#include "lab.cuh"
 
 constexpr int TILE_SIZE = 32;
 
@@ -67,62 +54,56 @@ void cpu_transpose(int rows, int cols, const float *input, float *output) {
   }
 }
 
-bool nearly_equal(float a, float b, float eps = 1e-5f) {
-  return std::fabs(a - b) < eps;
-}
+int main(int argc, char **argv) {
+  lab::Args args(argc, argv);
+  // The quick size is neither square nor a multiple of the tile size, which
+  // exercises the bounds checks on both the read and the write side.
+  const int rows = static_cast<int>(args.get_int("rows", args.quick() ? 1000 : 4096));
+  const int cols = static_cast<int>(args.get_int("cols", args.quick() ? 777 : 4096));
+  const size_t count = static_cast<size_t>(rows) * cols;
 
-bool validate_transpose(const std::vector<float> &reference,
-                        const std::vector<float> &candidate) {
-  for (size_t i = 0; i < reference.size(); ++i) {
-    if (!nearly_equal(reference[i], candidate[i])) {
-      std::cerr << "Mismatch at " << i << ": CPU=" << reference[i]
-                << ", GPU=" << candidate[i] << std::endl;
-      return false;
-    }
-  }
-  return true;
-}
+  lab::print_device();
+  printf("Shared-memory matrix transpose (%d x %d)\n", rows, cols);
 
-int main() {
-  const int rows = 4096;
-  const int cols = 4096;
-
-  std::vector<float> input(rows * cols);
-  std::vector<float> output_cpu(cols * rows);
-  std::vector<float> output_gpu(cols * rows);
-
-  for (int i = 0; i < rows * cols; ++i) {
-    input[i] = static_cast<float>(i % 1000) * 0.001f;
-  }
-
-  std::cout << "Running CPU validation..." << std::endl;
+  const std::vector<float> input = lab::random_uniform<float>(count, -1.f, 1.f, 3);
+  std::vector<float> output_cpu(count);
+  std::vector<float> output_gpu(count);
   cpu_transpose(rows, cols, input.data(), output_cpu.data());
 
   float *d_input;
   float *d_output;
-  CHECK(cudaMalloc(&d_input, input.size() * sizeof(float)));
-  CHECK(cudaMalloc(&d_output, output_gpu.size() * sizeof(float)));
-
-  CHECK(cudaMemcpy(d_input, input.data(), input.size() * sizeof(float),
-                   cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMalloc(&d_input, count * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_output, count * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_input, input.data(), count * sizeof(float),
+                        cudaMemcpyHostToDevice));
 
   dim3 block_dim(TILE_SIZE, TILE_SIZE);
-  dim3 grid_dim(CEIL_DIV(cols, TILE_SIZE), CEIL_DIV(rows, TILE_SIZE));
+  dim3 grid_dim(lab::ceil_div(cols, TILE_SIZE), lab::ceil_div(rows, TILE_SIZE));
 
   transpose_shared_memory<<<grid_dim, block_dim>>>(d_input, d_output, rows,
                                                    cols);
-  CHECK(cudaGetLastError());
-  CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK_LAUNCH();
+  CUDA_CHECK(cudaMemcpy(output_gpu.data(), d_output, count * sizeof(float),
+                        cudaMemcpyDeviceToHost));
 
-  CHECK(cudaMemcpy(output_gpu.data(), d_output,
-                   output_gpu.size() * sizeof(float), cudaMemcpyDeviceToHost));
-  const bool pass = validate_transpose(output_cpu, output_gpu);
+  // A transpose only moves values, so the result must match exactly.
+  const bool pass = lab::check_equal("transposed matrix", output_gpu, output_cpu);
 
-  std::cout << "Shared-Memory Matrix Transpose (" << rows << " x " << cols
-            << ")\n";
-  std::cout << "Validation " << (pass ? "PASSED" : "FAILED") << std::endl;
+  // A transpose reads and writes every element once; a plain copy of the
+  // same size is the speed limit it is measured against.
+  const float ms = lab::time_ms([&] {
+    transpose_shared_memory<<<grid_dim, block_dim>>>(d_input, d_output, rows,
+                                                     cols);
+  });
+  lab::report("shared-memory transpose", ms, 0, 2.0 * count * sizeof(float));
+  const float copy_ms = lab::time_ms([&] {
+    CUDA_CHECK(cudaMemcpy(d_output, d_input, count * sizeof(float),
+                          cudaMemcpyDeviceToDevice));
+  });
+  lab::report("cudaMemcpy (device to device)", copy_ms, 0,
+              2.0 * count * sizeof(float));
 
-  CHECK(cudaFree(d_input));
-  CHECK(cudaFree(d_output));
-  return pass ? 0 : 1;
+  CUDA_CHECK(cudaFree(d_input));
+  CUDA_CHECK(cudaFree(d_output));
+  return lab::finish(pass);
 }

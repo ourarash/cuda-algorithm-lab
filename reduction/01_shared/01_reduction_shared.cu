@@ -1,66 +1,44 @@
 /*
  * Shared Memory Parallel Reduction (Optimized)
- * 
+ *
  * High-Level Algorithm:
- * This kernel optimizes the naive reduction by employing fast on-chip shared memory, 
+ * This kernel optimizes the naive reduction by employing fast on-chip shared memory,
  * sequential thread mapping, and a redesigned reduction tree to eliminate warp divergence.
- * 
- * Phase 1 (Global-to-Shared Accumulation):
- * Each thread sequentially reads multiple elements from global memory, accumulating them 
- * into a local register sum. This guarantees perfectly coalesced memory reads and increases 
- * the work-per-thread, amortizing overhead. The thread's partial sum is then written 
- * into shared memory.
- * 
+ *
+ * Phase 1 (Global-to-Register Accumulation):
+ * Each thread reads multiple elements from global memory, accumulating them
+ * into a local register sum. Consecutive threads read consecutive elements,
+ * so the reads are perfectly coalesced, and the extra work per thread
+ * amortizes the cost of the tree that follows. The thread's partial sum is
+ * then written into shared memory once.
+ *
  * Phase 2 (Tree Reduction in Shared Memory):
  * How this tree drastically differs from the Naive approach:
- * - Shrinking Stride vs. Growing Stride: The naive tree started with stride=1 and grew (1, 2, 4...). 
+ * - Shrinking Stride vs. Growing Stride: The naive tree started with stride=1 and grew (1, 2, 4...).
  *   This optimized tree starts at half the block size and shrinks by half (e.g., 128, 64, 32...).
- * - Packed Active Threads vs. Scattered: In the naive tree, active threads were scattered 
- *   (`tid % stride == 0`), destroying warp utilization. Here, the check is `tid < stride`. 
+ * - Packed Active Threads vs. Scattered: In the naive tree, active threads were scattered
+ *   (`tid % stride == 0`), destroying warp utilization. Here, the check is `tid < stride`.
  *   This tightly packs all active threads contiguous to each other on the left side of the block.
- * - Resulting Hardware Efficiency: Because active threads are grouped perfectly together (0 to stride - 1), 
- *   entire warps will be 100% strictly active or 100% gracefully idle, successfully completely 
- *   eliminating warp divergence for all steps until the total active thread count drops below 32.
- * 
+ * - Resulting Hardware Efficiency: Because active threads are grouped together (0 to stride - 1),
+ *   every warp is either fully active or fully idle, which eliminates warp divergence for all
+ *   steps until the number of active threads drops below 32.
+ *
  * Why not a *growing* stride with packed threads in Shared Memory?
- * - If we packed threads but used a growing stride (e.g., `sharedData[2 * stride * tid] += ...`), 
- *   adjacent threads (T0, T1, T2) would access memory at leaps of 2, 4, 8, etc. Since shared 
- *   memory is divided into 32 banks, a stride of 2 causes 2-way bank conflicts (hardware serializes 
- *   the memory reads). A shrinking stride (`sharedData[tid] += ...`) ensures adjacent threads access 
- *   adjacent indices (stride of 1), completely eliminating both warp divergence AND bank conflicts.
+ * - If we packed threads but used a growing stride (e.g., `sharedData[2 * stride * tid] += ...`),
+ *   adjacent threads (T0, T1, T2) would access memory at leaps of 2, 4, 8, etc. Since shared
+ *   memory is divided into 32 banks, a stride of 2 causes 2-way bank conflicts (hardware serializes
+ *   the memory reads). A shrinking stride (`sharedData[tid] += ...`) ensures adjacent threads access
+ *   adjacent indices (stride of 1), eliminating both warp divergence AND bank conflicts.
  */
-#include <cuda_runtime.h>
-#include <stdio.h>
+#include <cstdio>
+#include <vector>
 
-#include <cmath>
-#include <random>
+#include "lab.cuh"
 
-#define BLOCK_SIZE 256  // Number of threads per block
-// Number of segments per thread block, i.e., how many input segments each
-// thread block will process.
+#define BLOCK_SIZE 256  // Number of threads per block (must be a power of two)
+// Number of BLOCK_SIZE-wide segments each thread block reduces. Each thread
+// adds up this many input elements in Phase 1.
 #define INPUT_SEGMENTS_PER_THREAD_BLOCK 4
-
-#define CHECK_CUDA(call)                                                       \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA error in %s at line %d: %s\n", __FILE__, __LINE__, \
-              cudaGetErrorString(err));                                        \
-      exit(EXIT_FAILURE);                                                      \
-    }                                                                          \
-  } while (0)
-
-template <typename T>
-constexpr inline T ceil_div(T a, T b) {
-  return (a + b - 1) / b;
-}
-
-// Check if two floating-point numbers are approximately equal by comparing
-// their absolute difference to a small epsilon value, scaled by the maximum of
-// their absolute values.
-bool float_equal(float a, float b, float eps = 1e-5f) {
-  return std::fabs(a - b) <= eps * std::fmax(std::fabs(a), std::fabs(b));
-}
 
 // -------------------------------------------------------------------------
 // Shared Memory Parallel Reduction Kernel
@@ -68,53 +46,50 @@ bool float_equal(float a, float b, float eps = 1e-5f) {
 // This reduction kernel improves on the naive approach by utilizing fast
 // on-chip shared memory, contiguous memory accesses, and reducing warp
 // divergence. Instead of modifying global memory, the threads first load data
-// and accumulate an initial sum into shared memory, then perform a tree
-// reduction.
-__global__ void reduction(float* input, float* partialSums, unsigned int N) {
+// and accumulate an initial sum, then perform a tree reduction in shared
+// memory.
+__global__ void reduction(const float* input, float* partialSums,
+                          unsigned int N) {
   // Local thread ID within the block
   unsigned int tid = threadIdx.x;
 
-  // Global starting index for this thread. Note that each thread block
-  // handles exactly INPUT_SEGMENTS_PER_THREAD_BLOCK elements chunked by block
-  // dimension.
+  // Global starting index for this thread. Each thread block handles
+  // INPUT_SEGMENTS_PER_THREAD_BLOCK consecutive segments of blockDim.x
+  // elements.
   unsigned int i =
       blockIdx.x * blockDim.x * INPUT_SEGMENTS_PER_THREAD_BLOCK + tid;
 
-  // Allocate shared memory for this block. Max size equals the number of
-  // threads.
+  // Shared memory for this block: one partial sum per thread.
   __shared__ float sharedData[BLOCK_SIZE];
 
-  // Initialize the shared memory element for this thread
-  sharedData[tid] = 0.0f;
-
+  // Phase 1: Global-to-Register Accumulation
+  // Each thread sums one element from each of the block's segments in a
+  // register. Within one iteration, consecutive threads read consecutive
+  // addresses, so every warp's load is coalesced.
+  float sum = 0.0f;
 #pragma unroll
-  // Phase 1: Global-to-Shared Accumulation
-  // Each thread processes multiple segments of the input array sequentially.
-  // This increases work-per-thread (amortizing instruction overhead),
-  // guarantees coalesced global memory reads, and reduces total kernel
-  // launches.
   for (int j = 0; j < INPUT_SEGMENTS_PER_THREAD_BLOCK; ++j) {
     if (i + j * blockDim.x < N) {
-      sharedData[tid] += input[i + j * blockDim.x];
+      sum += input[i + j * blockDim.x];
     }
   }
+  sharedData[tid] = sum;
 
   // Ensure all threads have finished writing their initial sums to shared
   // memory.
   __syncthreads();
 
-// Phase 2: Tree-based Reduction in Shared Memory
-// We use a shrinking stride (stride /= 2) instead of a growing stride.
-// This avoids warp divergence because active threads share the same consecutive
-// warps (e.g., in the first iteration, threads 0 to 127 are active, spanning
-// warps 0-3 fully).
-#pragma unroll
-  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+  // Phase 2: Tree-based Reduction in Shared Memory
+  // We use a shrinking stride (stride /= 2) instead of a growing stride.
+  // This avoids warp divergence because active threads share the same
+  // consecutive warps (e.g., in the first iteration, threads 0 to 127 are
+  // active, spanning warps 0-3 fully).
+  for (unsigned int stride = blockDim.x / 2; stride > 0; stride /= 2) {
     if (tid < stride) {
       // Add the value from the right half to the left half in shared memory.
       sharedData[tid] += sharedData[tid + stride];
     }
-    // Block-wide synchronization loop is required at each depth of the tree.
+    // Block-wide synchronization is required at each depth of the tree.
     __syncthreads();
   }
 
@@ -125,134 +100,49 @@ __global__ void reduction(float* input, float* partialSums, unsigned int N) {
   }
 }
 
-/**
- * @brief Accurately sums an array of floating-point numbers using the Kahan
- * summation algorithm.
- * * This method minimizes floating-point error by tracking a running
- * compensation for the low-order bits that are lost during addition.
- * * @param input An array of floats to be summed.
- * @param n The number of elements in the array.
- * @return The highly accurate sum of the elements.
- */
-float KahanSummation(float* input, int n) {
-  // The main accumulator, which holds the running total.
-  // Prone to precision errors when adding small numbers.
-  float runningSum = 0.0f;
+int main(int argc, char** argv) {
+  lab::Args args(argc, argv);
+  const unsigned int N = static_cast<unsigned int>(
+      args.get_int("n", args.quick() ? 100003 : (1 << 24) + 123));
+  const unsigned int numBlocks =
+      lab::ceil_div(N, static_cast<unsigned int>(INPUT_SEGMENTS_PER_THREAD_BLOCK * BLOCK_SIZE));
 
-  // Stores the accumulated error from previous additions.
-  // This is the "lost" part that we'll re-incorporate later.
-  float errorCorrection = 0.0f;
+  lab::print_device();
+  printf("Shared-memory reduction of %u floats\n", N);
 
-  for (int i = 0; i < n; i++) {
-    // 1. Compensate: Adjust the next input value by subtracting the error
-    //    that was calculated in the previous iteration.
-    float compensatedInput = input[i] - errorCorrection;
+  const std::vector<float> h_input = lab::random_uniform<float>(N, 0.f, 1.f, 7);
+  float *d_input, *d_partialSums;
+  CUDA_CHECK(cudaMalloc(&d_input, N * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_partialSums, numBlocks * sizeof(float)));
+  CUDA_CHECK(cudaMemcpy(d_input, h_input.data(), N * sizeof(float),
+                        cudaMemcpyHostToDevice));
 
-    // 2. Add: Add the compensated value to our main running sum.
-    //    This is where precision can be lost.
-    float newSum = runningSum + compensatedInput;
+  reduction<<<numBlocks, BLOCK_SIZE>>>(d_input, d_partialSums, N);
+  CUDA_CHECK_LAUNCH();
 
-    // 3. Capture Error: Calculate the new error. This is the crucial step.
-    //    It recovers the part of 'compensatedInput' that was lost when adding
-    //    to 'runningSum'.
-    errorCorrection = (newSum - runningSum) - compensatedInput;
-
-    // 4. Update: Set the running sum to our new, albeit imprecise, total.
-    //    The error has been safely stored for the next loop.
-    runningSum = newSum;
+  // Add the block partial sums on the host in double precision.
+  std::vector<float> h_partialSums(numBlocks);
+  CUDA_CHECK(cudaMemcpy(h_partialSums.data(), d_partialSums,
+                        numBlocks * sizeof(float), cudaMemcpyDeviceToHost));
+  double gpu_sum = 0.0;
+  for (float partial : h_partialSums) {
+    gpu_sum += partial;
   }
 
-  return runningSum;
-}
-
-float LaunchReduction(float* input, float* partialSums, int n) {
-  int numBlocks = ceil_div(n, (INPUT_SEGMENTS_PER_THREAD_BLOCK * BLOCK_SIZE));
-
-  float elapsed_time_ms = 0.0f;
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  cudaEventRecord(start, 0);
-
-  // Launch the reduction kernel
-  reduction<<<numBlocks, BLOCK_SIZE>>>(input, partialSums, n);
-
-  // Check for errors in kernel launch
-  CHECK_CUDA(cudaGetLastError());
-
-  cudaEventRecord(stop, 0);
-
-  // Synchronize to ensure all threads have completed
-  CHECK_CUDA(cudaDeviceSynchronize());
-  cudaEventElapsedTime(&elapsed_time_ms, start, stop);
-
-  cudaEventDestroy(start);
-  cudaEventDestroy(stop);
-
-  return elapsed_time_ms;
-}
-
-int main() {
-  // Example usage of the reduction function
-  const int N = 1024 * 1024;
-  int numBlocks = ceil_div(N, (INPUT_SEGMENTS_PER_THREAD_BLOCK * BLOCK_SIZE));
-
-  // Allocate device and host memory for input data.
-  float *d_input, *h_input;
-  CHECK_CUDA(cudaMalloc((void**)&d_input, N * sizeof(float)));
-  h_input = (float*)malloc(N * sizeof(float));
-  // Initialize input data with random numbers between 0 and 1.5
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<float> dis(1.0f, 1.1f);
-
-  for (int i = 0; i < N; i++) {
-    h_input[i] = dis(gen);
+  double cpu_sum = 0.0;
+  for (float x : h_input) {
+    cpu_sum += x;
   }
-  // Copy input data to device
-  CHECK_CUDA(
-      cudaMemcpy(d_input, h_input, N * sizeof(float), cudaMemcpyHostToDevice));
+  printf("GPU sum: %.6f\nCPU sum: %.6f\n", gpu_sum, cpu_sum);
+  const std::vector<double> got = {gpu_sum}, expected = {cpu_sum};
+  const bool pass = lab::check_close("sum", got, expected, 1e-5, 0.0);
 
-  // Allocate host and device memory for partial sums
-  float* d_partialSums;
-  float* h_partialSums = (float*)malloc(numBlocks * sizeof(float));
-  CHECK_CUDA(cudaMalloc((void**)&d_partialSums, numBlocks * sizeof(float)));
-  CHECK_CUDA(cudaMemset(d_partialSums, 0, numBlocks * sizeof(float)));
+  const float ms = lab::time_ms(
+      [&] { reduction<<<numBlocks, BLOCK_SIZE>>>(d_input, d_partialSums, N); });
+  lab::report("shared-memory reduction", ms, N,
+              static_cast<double>(N) * sizeof(float));
 
-  // Launch reduction kernel
-  float elapsed_time_ms = LaunchReduction(d_input, d_partialSums, N);
-
-  // Copy result back to host
-  CHECK_CUDA(cudaMemcpy(h_partialSums, d_partialSums, numBlocks * sizeof(float),
-                        cudaMemcpyDeviceToHost));
-
-  // Reduce the partial sums on the host
-  float finalSum = 0.0f;
-  for (int i = 0; i < numBlocks; i++) {
-    // printf("Partial sum %d: %f\n", i, h_partialSums[i]);
-    finalSum += h_partialSums[i];
-  }
-
-  printf("Final reduction result: %f\n", finalSum);
-
-  // Perform CPU reduction for verification
-  float cpu_result = KahanSummation(h_input, N);
-  printf("CPU Reduction result: %f\n", cpu_result);
-
-  // Check if results match
-  if (float_equal(finalSum, cpu_result)) {
-    printf("✅Results match!\n");
-  } else {
-    printf("❌Results do not match!\n");
-  }
-
-  printf("Kernel time:  %8.2f ms\n", elapsed_time_ms);
-
-  // Free device and host memory
-  CHECK_CUDA(cudaFree(d_input));
-  CHECK_CUDA(cudaFree(d_partialSums));
-  free(h_partialSums);
-  free(h_input);
-
-  return 0;
+  CUDA_CHECK(cudaFree(d_input));
+  CUDA_CHECK(cudaFree(d_partialSums));
+  return lab::finish(pass);
 }

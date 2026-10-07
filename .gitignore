@@ -10,3 +10,6 @@
 *.bazel.lock
 .venv
 *.x
+
+# CMake build output
+/build/

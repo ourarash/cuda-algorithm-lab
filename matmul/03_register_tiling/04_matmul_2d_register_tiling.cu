@@ -10,30 +10,16 @@
  * - Load a small register tile from both shared-memory tiles.
  * - Let each thread accumulate a TM x TN patch of output values in registers.
  * - Write the whole patch back to global memory at the end.
+ *
+ * The host-side driver (inputs, CPU reference, validation, timing) lives in
+ * ../gemm_harness.cuh and is shared by every stage.
  */
-#include <cassert>
-#include <cmath>
-#include <cstdlib>
-#include <cuda_runtime.h>
-#include <iostream>
-#include <vector>
-
-#define CHECK(call)                                                            \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "     \
-                << cudaGetErrorString(err) << std::endl;                       \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
-
-#define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
+#include "../gemm_harness.cuh"
 
 // --- Tiling and Block Dimensions ---
-constexpr int BM = 128; // Block size in M dimension
-constexpr int BN = 128; // Block size in N dimension
-constexpr int BK = 8;   // Inner loop tile size
+constexpr int BM = 128;  // Block size in M dimension
+constexpr int BN = 128;  // Block size in N dimension
+constexpr int BK = 8;    // Inner loop tile size
 
 // Work per thread (2D Register-level tiling)
 // Each thread will compute an 8x8 grid of C.
@@ -44,14 +30,23 @@ constexpr int TN = 8;
 // Number of threads = (128/8) * (128/8) = 16 * 16 = 256
 constexpr int BLOCK_DIM_X = BN / TN;
 constexpr int BLOCK_DIM_Y = BM / TM;
+constexpr int NUM_THREADS = BLOCK_DIM_X * BLOCK_DIM_Y;
 
 /**
  * 4. 2D Register Tiling
  * Building upon 1D register tiling, each thread now computes a 2D grid
  * (8x8) of output elements. It loads 8 elements from the A tile and 8
  * elements from the B tile into local registers, then performs 64
- * multiply-accumulate operations. This drastically improves arithmetic
- * intensity and heavily minimizes shared memory bottleneck.
+ * multiply-accumulate operations. That is 64 FMAs per 16 shared-memory loads,
+ * compared with 8 FMAs per 9 loads in the 1D version.
+ *
+ * What still limits it (and what the next stage, 04_vectorized, changes):
+ * - Every shared-memory load is a separate 32-bit instruction.
+ * - The shared-memory reads have bank conflicts. A warp here is two rows of
+ *   16 threads. Reading Bs[dotIdx][threadCol * TN + j], threads whose
+ *   threadCol differs by 4 are 32 words apart, so they hit the same bank:
+ *   a 4-way conflict. Reading As[threadRow * TM + i][dotIdx], the warp's two
+ *   threadRows are 64 words apart: a 2-way conflict.
  */
 __global__ void sgemm_2d_register_tiling(int M, int N, int K, float alpha,
                                          const float *A, const float *B,
@@ -84,7 +79,7 @@ __global__ void sgemm_2d_register_tiling(int M, int N, int K, float alpha,
   for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
     // Cooperatively load the A tile into shared memory.
     // 256 threads fill BM*BK = 128*8 = 1024 elements, so each thread loads 4.
-    for (int loadOffset = 0; loadOffset < BM * BK; loadOffset += 256) {
+    for (int loadOffset = 0; loadOffset < BM * BK; loadOffset += NUM_THREADS) {
       int loadId = threadId + loadOffset;
       int a_row = loadId / BK;
       int a_col = loadId % BK;
@@ -99,7 +94,7 @@ __global__ void sgemm_2d_register_tiling(int M, int N, int K, float alpha,
     }
 
     // Cooperatively load the matching B tile into shared memory.
-    for (int loadOffset = 0; loadOffset < BK * BN; loadOffset += 256) {
+    for (int loadOffset = 0; loadOffset < BK * BN; loadOffset += NUM_THREADS) {
       int loadId = threadId + loadOffset;
       int b_row = loadId / BN;
       int b_col = loadId % BN;
@@ -120,9 +115,11 @@ __global__ void sgemm_2d_register_tiling(int M, int N, int K, float alpha,
     for (int dotIdx = 0; dotIdx < BK; ++dotIdx) {
       // Pull one column fragment from A and one row fragment from B into
       // registers. These fragments feed the full 8x8 outer product update.
+#pragma unroll
       for (int i = 0; i < TM; ++i) {
         regM[i] = As[threadRow * TM + i][dotIdx];
       }
+#pragma unroll
       for (int j = 0; j < TN; ++j) {
         regN[j] = Bs[dotIdx][threadCol * TN + j];
       }
@@ -131,7 +128,9 @@ __global__ void sgemm_2d_register_tiling(int M, int N, int K, float alpha,
       // This is the key advantage over 1D tiling: one set of loaded register
       // values updates an 8x8 patch instead of only a row or a column, so the
       // thread does more math per shared-memory read.
+#pragma unroll
       for (int i = 0; i < TM; ++i) {
+#pragma unroll
         for (int j = 0; j < TN; ++j) {
           threadResults[i * TN + j] += regM[i] * regN[j];
         }
@@ -157,65 +156,15 @@ __global__ void sgemm_2d_register_tiling(int M, int N, int K, float alpha,
   }
 }
 
-void cpu_gemm(int M, int N, int K, float alpha, const float *A, const float *B,
-              float beta, float *C) {
-  for (int x = 0; x < M; ++x)
-    for (int y = 0; y < N; ++y) {
-      float tmp = 0.0f;
-      for (int i = 0; i < K; ++i)
-        tmp += A[x * K + i] * B[i * N + y];
-      C[x * N + y] = alpha * tmp + beta * C[x * N + y];
-    }
+void launch_sgemm_2d_register_tiling(int M, int N, int K, float alpha,
+                                     const float *A, const float *B,
+                                     float beta, float *C) {
+  dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+  dim3 grid(lab::ceil_div(N, BN), lab::ceil_div(M, BM));
+  sgemm_2d_register_tiling<<<grid, block>>>(M, N, K, alpha, A, B, beta, C);
 }
 
-bool nearly_equal(float a, float b, float eps = 1e-4f) {
-  return std::fabs(a - b) < eps;
-}
-
-int main() {
-  const int M = 1024, N = 1024, K = 1024;
-  float alpha = 1.0f, beta = 0.0f;
-
-  std::vector<float> A(M * K), B(K * N), C_cpu(M * N), C_gpu(M * N);
-
-  for (int i = 0; i < M * K; ++i) A[i] = static_cast<float>(i % 13);
-  for (int i = 0; i < K * N; ++i) B[i] = static_cast<float>((i % 7) - 3);
-  for (int i = 0; i < M * N; ++i) { C_cpu[i] = 1.0f; C_gpu[i] = 1.0f; }
-
-  std::cout << "Running CPU validation..." << std::endl;
-  cpu_gemm(M, N, K, alpha, A.data(), B.data(), beta, C_cpu.data());
-
-  float *dA, *dB, *dC;
-  CHECK(cudaMalloc(&dA, A.size() * sizeof(float)));
-  CHECK(cudaMalloc(&dB, B.size() * sizeof(float)));
-  CHECK(cudaMalloc(&dC, C_gpu.size() * sizeof(float)));
-
-  CHECK(cudaMemcpy(dA, A.data(), A.size() * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dB, B.data(), B.size() * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dC, C_gpu.data(), C_gpu.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-  dim3 gridDim(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
-  dim3 blockDim(BLOCK_DIM_X, BLOCK_DIM_Y, 1);
-
-  cudaEvent_t start, stop;
-  CHECK(cudaEventCreate(&start));
-  CHECK(cudaEventCreate(&stop));
-
-  CHECK(cudaEventRecord(start));
-  sgemm_2d_register_tiling<<<gridDim, blockDim>>>(M, N, K, alpha, dA, dB, beta, dC);
-  CHECK(cudaEventRecord(stop));
-
-  CHECK(cudaGetLastError());
-  CHECK(cudaEventSynchronize(stop));
-
-  float ms = 0.0f;
-  CHECK(cudaEventElapsedTime(&ms, start, stop));
-  std::cout << "Kernel Execution Time (2D Register Tiling): " << ms << " ms\n";
-
-  CHECK(cudaMemcpy(C_gpu.data(), dC, C_gpu.size() * sizeof(float), cudaMemcpyDeviceToHost));
-  bool pass = true;
-  for (int i = 0; i < M * N; ++i) { if (!nearly_equal(C_cpu[i], C_gpu[i])) { pass = false; break; } }
-  if (pass) std::cout << "Validation PASSED!" << std::endl;
-
-  return 0;
+int main(int argc, char **argv) {
+  return run_gemm<float>("2D register tiling", argc, argv, {1024, 1024, 1024},
+                         {257, 129, 95}, launch_sgemm_2d_register_tiling);
 }

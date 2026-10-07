@@ -4,96 +4,105 @@
  * Intention:
  * This file is a toy CUDA implementation of ant colony optimization for the
  * travelling salesman problem. It is not meant to be a production solver; it
- * is meant to show how many candidate tours can be explored in parallel.
+ * is meant to show how many candidate tours can be explored in parallel, and
+ * how to combine per-thread results without races.
  *
- * High-Level Algorithm:
- * - Keep the distance matrix and pheromone matrix on the device.
- * - Launch one thread per ant so each thread builds one full tour.
- * - Measure each tour length and track the best one found so far.
- * - Evaporate pheromones globally, then reinforce edges from the best tour.
- * - Repeat for many iterations.
+ * High-Level Algorithm (one iteration):
+ * 1. Construct: one thread per ant builds a full tour. At each step it picks
+ *    the next unvisited city with probability proportional to
+ *    pheromone(edge) / distance(edge). Each ant writes its tour and length to
+ *    its own slot in global memory, so no two threads write the same place.
+ * 2. Select: a separate kernel finds the shortest tour of this iteration and,
+ *    if it beats the best so far, copies it into the global best.
+ * 3. Evaporate: one thread per matrix entry scales every pheromone by
+ *    (1 - rho), using a 2D grid of 16 x 16 blocks.
+ * 4. Deposit: one thread per edge of the best tour adds Q / best_length to
+ *    that edge in both directions.
+ *
+ * Why the select step is separate:
+ * A tempting shortcut is to let every ant do "if my tour is better than the
+ * best, copy it into best_path" with an atomic min on the length. But the
+ * atomic only protects the length. Two ants that both improve on the old best
+ * can interleave their copies, leaving best_path as a mix of two tours that
+ * is not even a valid permutation. Writing results to separate slots and
+ * choosing afterwards avoids that race entirely.
+ *
+ * The cities are random points in a square, so distances are symmetric and
+ * Euclidean. The program checks that the best tour visits every city exactly
+ * once and that its reported length is right, and prints a greedy
+ * nearest-neighbor tour for comparison.
  */
-#include <cuda.h>
 #include <curand_kernel.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
 
-#define N 100     // number of cities
-#define THREADS N // one thread per ant
-#define BLOCKS 1
-#define MAX_ITERS 1000 // number of ACO iterations
-#define Q 100.0f       // pheromone deposit constant
-#define RHO 0.1f       // evaporation rate
+#include <algorithm>
+#include <cfloat>
+#include <cmath>
+#include <cstdio>
+#include <random>
+#include <vector>
 
-// CUDA error checking macro
-#define CUDA_CHECK(call)                                                       \
-  if ((call) != cudaSuccess) {                                                 \
-    fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__,           \
-            cudaGetErrorString(cudaGetLastError()));                           \
-    exit(EXIT_FAILURE);                                                        \
+#include "lab.cuh"
+
+constexpr int kNumCities = 100;
+constexpr int kNumAnts = kNumCities;  // One ant per starting city
+constexpr float kDeposit = 100.0f;    // Q: pheromone deposited per tour
+constexpr float kEvaporation = 0.1f;  // rho: fraction evaporated per iteration
+
+// Distance and pheromone matrices live in global memory as __device__
+// variables, filled from the host with cudaMemcpyToSymbol.
+__device__ float d_dist[kNumCities][kNumCities];
+__device__ float d_pheromone[kNumCities][kNumCities];
+
+// One random-number generator state per ant.
+__global__ void init_curand(curandState *states, unsigned long long seed) {
+  int id = threadIdx.x + blockIdx.x * blockDim.x;
+  if (id < kNumAnts) {
+    curand_init(seed, id, 0, &states[id]);
+  }
+}
+
+// 1. Construct: each thread builds one tour.
+__global__ void construct_tours_kernel(curandState *states, int *tours,
+                                       float *lengths) {
+  int ant = threadIdx.x + blockIdx.x * blockDim.x;
+  if (ant >= kNumAnts) {
+    return;
   }
 
-// Global device memory
-__device__ float d_dist[N][N];          // Distance matrix
-__device__ float d_pheromone[N][N];     // Pheromone matrix
-__device__ int d_best_path[N];          // Best tour path found so far
-__device__ float d_best_length = 1e30f; // Best tour length (initialized high)
+  // Per-thread arrays this large do not fit in registers, so the compiler
+  // places them in (cached) local memory. That is acceptable for a toy.
+  int tour[kNumCities];
+  bool visited[kNumCities] = {};
+  float prob[kNumCities];
+  curandState local_state = states[ant];
 
-// Initialize random number generator (one per thread)
-__global__ void init_curand(curandState *states, unsigned long seed) {
-  int id = threadIdx.x + blockIdx.x * blockDim.x;
-  curand_init(seed, id, 0, &states[id]);
-}
-
-// Compute total length of a given tour
-__device__ float compute_length(int *tour) {
-  float sum = 0;
-  for (int i = 0; i < N; ++i)
-    sum += d_dist[tour[i]][tour[(i + 1) % N]];
-  return sum;
-}
-
-// Kernel: each thread builds a full tour (one ant per thread)
-__global__ void ant_colony_kernel(curandState *states) {
-  int tid = threadIdx.x + blockIdx.x * blockDim.x;
-  if (tid >= N)
-    return;
-
-  int tour[N];           // tour built by this thread
-  bool visited[N] = {0}; // track visited cities
-  curandState local_state = states[tid];
-
-  // Start tour from the thread's assigned city
-  int city = tid;
+  int city = ant % kNumCities;
   tour[0] = city;
   visited[city] = true;
 
-  // Build the tour step by step
-  for (int step = 1; step < N; ++step) {
-    float prob[N] = {0}; // edge selection probabilities
+  for (int step = 1; step < kNumCities; ++step) {
+    // Unnormalized probability of moving to each unvisited city.
     float sum = 0.0f;
-
-    // Compute unnormalized probabilities
-    for (int j = 0; j < N; ++j) {
+    for (int j = 0; j < kNumCities; ++j) {
+      prob[j] = 0.0f;
       if (!visited[j]) {
-        float tau = d_pheromone[city][j];             // pheromone
-        float eta = 1.0f / (d_dist[city][j] + 1e-6f); // inverse distance
+        float tau = d_pheromone[city][j];
+        float eta = 1.0f / (d_dist[city][j] + 1e-6f);
         prob[j] = tau * eta;
         sum += prob[j];
       }
     }
 
-    // Sample next city using roulette wheel selection
+    // Roulette-wheel selection. Start from the last unvisited city so a
+    // rounding shortfall in the running sum still yields a valid choice.
     float r = curand_uniform(&local_state) * sum;
     float acc = 0.0f;
     int next_city = -1;
-
-    for (int j = 0; j < N; ++j) {
+    for (int j = 0; j < kNumCities; ++j) {
       if (!visited[j]) {
+        next_city = j;
         acc += prob[j];
         if (acc >= r) {
-          next_city = j;
           break;
         }
       }
@@ -104,97 +113,180 @@ __global__ void ant_colony_kernel(curandState *states) {
     visited[city] = true;
   }
 
-  // Compute tour length
-  float L = compute_length(tour);
-
-  // Atomically update global best if this tour is better
-  if (atomicMin(&d_best_length, L) > L) {
-    for (int i = 0; i < N; ++i)
-      d_best_path[i] = tour[i];
+  float length = 0.0f;
+  for (int i = 0; i < kNumCities; ++i) {
+    length += d_dist[tour[i]][tour[(i + 1) % kNumCities]];
   }
 
-  // Save RNG state for next iteration
-  states[tid] = local_state;
+  for (int i = 0; i < kNumCities; ++i) {
+    tours[ant * kNumCities + i] = tour[i];
+  }
+  lengths[ant] = length;
+  states[ant] = local_state;
 }
 
-// Kernel: evaporate and reinforce pheromones based on best tour
-__global__ void update_pheromones_kernel(float Q, float rho, int *best_path,
-                                         float best_length) {
-  int i = threadIdx.x;
-  int j = threadIdx.y;
-  if (i >= N || j >= N)
-    return;
-
-  // Evaporate pheromone on all edges
-  d_pheromone[i][j] *= (1.0f - rho);
-
-  // Reinforce edges in best path only
-  for (int k = 0; k < N; ++k) {
-    int from = best_path[k];
-    int to = best_path[(k + 1) % N]; // wrap around to starting city
-    if ((i == from && j == to) || (i == to && j == from)) {
-      d_pheromone[i][j] += Q / best_length;
+// 2. Select: keep the best tour seen so far. With only kNumAnts candidates a
+// single thread is plenty; a large colony would use a parallel argmin
+// reduction (see reduction/).
+__global__ void select_best_kernel(const int *tours, const float *lengths,
+                                   int *best_tour, float *best_length) {
+  int best_ant = 0;
+  for (int ant = 1; ant < kNumAnts; ++ant) {
+    if (lengths[ant] < lengths[best_ant]) {
+      best_ant = ant;
+    }
+  }
+  if (lengths[best_ant] < *best_length) {
+    *best_length = lengths[best_ant];
+    for (int i = 0; i < kNumCities; ++i) {
+      best_tour[i] = tours[best_ant * kNumCities + i];
     }
   }
 }
 
-// Host-side driver for the full ant-colony optimization loop.
-int main() {
-  float h_dist[N][N], h_pheromone[N][N];
-  int h_best_path[N];
-  float h_best_length;
+// 3. Evaporate: one thread per pheromone entry.
+__global__ void evaporate_kernel(float rho) {
+  int i = blockIdx.y * blockDim.y + threadIdx.y;
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < kNumCities && j < kNumCities) {
+    d_pheromone[i][j] *= (1.0f - rho);
+  }
+}
 
-  // Initialize host matrices
-  srand(time(NULL));
-  for (int i = 0; i < N; ++i)
-    for (int j = 0; j < N; ++j) {
-      h_dist[i][j] =
-          (i == j) ? 1e6 : (float)(rand() % 100 + 1); // avoid 0 distance
-      h_pheromone[i][j] = 1.0f; // uniform initial pheromone
+// 4. Deposit: one thread per edge of the best tour. A tour visits each city
+// once, so every undirected edge appears at most once and no two threads
+// update the same entry.
+__global__ void deposit_kernel(float deposit, const int *best_tour,
+                               const float *best_length) {
+  int k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k < kNumCities) {
+    int from = best_tour[k];
+    int to = best_tour[(k + 1) % kNumCities];
+    float amount = deposit / *best_length;
+    d_pheromone[from][to] += amount;
+    d_pheromone[to][from] += amount;
+  }
+}
+
+// Greedy nearest-neighbor tour from city 0, as a CPU baseline.
+double nearest_neighbor_length(const std::vector<float> &dist) {
+  std::vector<bool> visited(kNumCities, false);
+  int city = 0;
+  visited[0] = true;
+  double length = 0.0;
+  for (int step = 1; step < kNumCities; ++step) {
+    int next = -1;
+    for (int j = 0; j < kNumCities; ++j) {
+      if (!visited[j] &&
+          (next < 0 || dist[city * kNumCities + j] < dist[city * kNumCities + next])) {
+        next = j;
+      }
     }
+    length += dist[city * kNumCities + next];
+    visited[next] = true;
+    city = next;
+  }
+  return length + dist[city * kNumCities + 0];
+}
 
-  // Copy data to device memory
-  CUDA_CHECK(cudaMemcpyToSymbol(d_dist, h_dist, sizeof(float) * N * N));
-  CUDA_CHECK(
-      cudaMemcpyToSymbol(d_pheromone, h_pheromone, sizeof(float) * N * N));
+int main(int argc, char **argv) {
+  lab::Args args(argc, argv);
+  const int iterations = static_cast<int>(args.get_int("iters", args.quick() ? 20 : 1000));
 
-  // Allocate and initialize curand RNG states
+  lab::print_device();
+  printf("Ant colony optimization: %d cities, %d ants, %d iterations\n",
+         kNumCities, kNumAnts, iterations);
+
+  // Random cities in a 100 x 100 square; symmetric Euclidean distances.
+  std::mt19937 gen(2024);
+  std::uniform_real_distribution<float> coord(0.0f, 100.0f);
+  std::vector<float> x(kNumCities), y(kNumCities);
+  for (int i = 0; i < kNumCities; ++i) {
+    x[i] = coord(gen);
+    y[i] = coord(gen);
+  }
+  std::vector<float> h_dist(kNumCities * kNumCities);
+  for (int i = 0; i < kNumCities; ++i) {
+    for (int j = 0; j < kNumCities; ++j) {
+      h_dist[i * kNumCities + j] = std::hypot(x[i] - x[j], y[i] - y[j]);
+    }
+  }
+  const std::vector<float> h_pheromone(kNumCities * kNumCities, 1.0f);
+  CUDA_CHECK(cudaMemcpyToSymbol(d_dist, h_dist.data(),
+                                h_dist.size() * sizeof(float)));
+  CUDA_CHECK(cudaMemcpyToSymbol(d_pheromone, h_pheromone.data(),
+                                h_pheromone.size() * sizeof(float)));
+
   curandState *d_states;
-  CUDA_CHECK(cudaMalloc(&d_states, N * sizeof(curandState)));
-  init_curand<<<1, THREADS>>>(d_states, time(NULL));
+  int *d_tours, *d_best_tour;
+  float *d_lengths, *d_best_length;
+  CUDA_CHECK(cudaMalloc(&d_states, kNumAnts * sizeof(curandState)));
+  CUDA_CHECK(cudaMalloc(&d_tours, kNumAnts * kNumCities * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_lengths, kNumAnts * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_best_tour, kNumCities * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_best_length, sizeof(float)));
+  const float initial_best = FLT_MAX;
+  CUDA_CHECK(cudaMemcpy(d_best_length, &initial_best, sizeof(float),
+                        cudaMemcpyHostToDevice));
+
+  const int ant_threads = 128;
+  const int ant_blocks = lab::ceil_div(kNumAnts, ant_threads);
+  init_curand<<<ant_blocks, ant_threads>>>(d_states, /*seed=*/1234);
+  CUDA_CHECK_LAUNCH();
+
+  // A 2D launch for the N x N pheromone matrix. A single block of N x N
+  // threads would need 10,000 threads, far above the 1,024-per-block limit.
+  const dim3 evap_block(16, 16);
+  const dim3 evap_grid(lab::ceil_div(kNumCities, 16), lab::ceil_div(kNumCities, 16));
+
+  for (int iter = 0; iter < iterations; ++iter) {
+    construct_tours_kernel<<<ant_blocks, ant_threads>>>(d_states, d_tours,
+                                                        d_lengths);
+    select_best_kernel<<<1, 1>>>(d_tours, d_lengths, d_best_tour, d_best_length);
+    evaporate_kernel<<<evap_grid, evap_block>>>(kEvaporation);
+    deposit_kernel<<<lab::ceil_div(kNumCities, 128), 128>>>(kDeposit, d_best_tour,
+                                                           d_best_length);
+    CUDA_CHECK_LAUNCH();
+  }
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  // Get pointer to d_best_path
-  int *d_best_path_ptr;
-  CUDA_CHECK(cudaGetSymbolAddress((void **)&d_best_path_ptr, d_best_path));
+  float best_length = 0.0f;
+  std::vector<int> best_tour(kNumCities);
+  CUDA_CHECK(cudaMemcpy(&best_length, d_best_length, sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(best_tour.data(), d_best_tour, kNumCities * sizeof(int),
+                        cudaMemcpyDeviceToHost));
 
-  // Main optimization loop
-  for (int iter = 0; iter < MAX_ITERS; ++iter) {
-    // Construct tours
-    ant_colony_kernel<<<BLOCKS, THREADS>>>(d_states);
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    // Get best length so far
-    CUDA_CHECK(
-        cudaMemcpyFromSymbol(&h_best_length, d_best_length, sizeof(float)));
-
-    // Update pheromones based on best tour
-    update_pheromones_kernel<<<1, dim3(N, N)>>>(Q, RHO, d_best_path_ptr,
-                                                h_best_length);
-    CUDA_CHECK(cudaDeviceSynchronize());
+  printf("Best tour length (ACO):          %.2f\n", best_length);
+  printf("Greedy nearest-neighbor length:  %.2f\n", nearest_neighbor_length(h_dist));
+  printf("Best tour:");
+  for (int city : best_tour) {
+    printf(" %d", city);
   }
-
-  // Copy result back
-  CUDA_CHECK(
-      cudaMemcpyFromSymbol(&h_best_length, d_best_length, sizeof(float)));
-  CUDA_CHECK(cudaMemcpyFromSymbol(h_best_path, d_best_path, sizeof(int) * N));
-
-  // Print best tour and length
-  printf("Best tour length: %.2f\nPath:\n", h_best_length);
-  for (int i = 0; i < N; ++i)
-    printf("%d ", h_best_path[i]);
   printf("\n");
 
-  cudaFree(d_states);
-  return 0;
+  // The tour must visit every city exactly once ...
+  std::vector<int> sorted_tour = best_tour, all_cities(kNumCities);
+  std::sort(sorted_tour.begin(), sorted_tour.end());
+  for (int i = 0; i < kNumCities; ++i) {
+    all_cities[i] = i;
+  }
+  bool pass = lab::check_equal("tour is a permutation", sorted_tour, all_cities);
+  // ... and its reported length must match a recomputation.
+  if (pass) {
+    double length = 0.0;
+    for (int i = 0; i < kNumCities; ++i) {
+      length += h_dist[best_tour[i] * kNumCities + best_tour[(i + 1) % kNumCities]];
+    }
+    const std::vector<float> got = {best_length};
+    const std::vector<double> expected = {length};
+    pass = lab::check_close("tour length", got, expected, 1e-4, 0.0);
+  }
+
+  CUDA_CHECK(cudaFree(d_states));
+  CUDA_CHECK(cudaFree(d_tours));
+  CUDA_CHECK(cudaFree(d_lengths));
+  CUDA_CHECK(cudaFree(d_best_tour));
+  CUDA_CHECK(cudaFree(d_best_length));
+  return lab::finish(pass);
 }

@@ -2,193 +2,168 @@
  * Vectorized Matrix Multiplication
  *
  * Intention:
- * This file widens memory accesses with float4 loads and stores to improve
- * memory throughput compared with the scalar shared-memory version.
+ * This file keeps the 2D register tiling from the previous stage and widens
+ * its memory instructions to 128 bits with float4, so the same data moves
+ * with a quarter of the load/store instructions.
  *
  * High-Level Algorithm:
- * - Keep the tiled shared-memory structure from earlier GEMM kernels.
- * - Load B in float4 chunks so each thread fetches four neighboring values at
- *   once.
- * - Accumulate four outputs per thread in registers.
- * - Store the result back with vector-friendly access patterns.
+ * - Same block tile (128 x 128), K tile (8), and 8 x 8 outputs per thread as
+ *   03_register_tiling/04_matmul_2d_register_tiling.cu.
+ * - Global -> shared: each thread loads one float4 of A and one float4 of B
+ *   per K tile instead of four scalar floats of each.
+ * - Store the A tile transposed in shared memory (As[k][m]). Each thread's 8
+ *   A values for a given k are then contiguous, so they can be read with two
+ *   float4 loads, exactly like its 8 B values.
+ * - Read and write C with float4 as well.
+ *
+ * Requirements:
+ * float4 accesses must be 16-byte aligned. cudaMalloc returns aligned
+ * pointers, and every float4 here starts at a column that is a multiple of 4,
+ * so rows must also start on a 16-byte boundary: N and K must be multiples of
+ * 4. M can be anything. The harness rejects other sizes.
+ *
+ * The host-side driver (inputs, CPU reference, validation, timing) lives in
+ * ../gemm_harness.cuh and is shared by every stage.
  */
-#include <cmath>
-#include <cstdlib>
-#include <cuda_runtime.h>
-#include <iostream>
-#include <vector>
+#include "../gemm_harness.cuh"
 
-#define CHECK(call)                                                            \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "     \
-                << cudaGetErrorString(err) << std::endl;                       \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
+constexpr int BM = 128;  // Block tile size in M
+constexpr int BN = 128;  // Block tile size in N
+constexpr int BK = 8;    // Block tile size in K
+constexpr int TM = 8;    // Outputs per thread in M
+constexpr int TN = 8;    // Outputs per thread in N
+constexpr int NUM_THREADS = (BM / TM) * (BN / TN);  // 256
 
-#define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
+// Each K tile of A (BM x BK) and of B (BK x BN) holds exactly one float4 per
+// thread, which keeps the loading code free of loops.
+static_assert(BM * BK == 4 * NUM_THREADS, "one float4 of A per thread");
+static_assert(BK * BN == 4 * NUM_THREADS, "one float4 of B per thread");
 
-#define TILE_SIZE 32 // Tile size for shared memory
+__device__ __forceinline__ float4 load_float4(const float *p) {
+  return *reinterpret_cast<const float4 *>(p);
+}
 
 /**
- * 5. Vectorized Memory Access Approach (`float4`)
- * This kernel improves memory throughput by fetching 128-bit blocks (four 32-bit
- * floats) from global memory at once using the `float4` built-in type. 
- * It also computes 4 output values per thread (instruction-level parallelism) 
- * and stores them back using vectorized stores.
+ * 5. Vectorized memory access (float4) on top of 2D register tiling.
  */
 __global__ void sgemm_vectorized(int M, int N, int K, float alpha,
                                  const float *A, const float *B, float beta,
                                  float *C) {
-  // Shared memory for tiles. tileB is cast to float4, so its inner dimension is divided by 4.
-  __shared__ float tileA[TILE_SIZE][TILE_SIZE];
-  __shared__ float4 tileB[TILE_SIZE][TILE_SIZE / 4];
+  // As is stored transposed: As[k][m] holds A[blockRow + m][k0 + k].
+  // __align__(16) guarantees the float4 reads below are aligned; a plain
+  // float array is only guaranteed 4-byte alignment.
+  __shared__ __align__(16) float As[BK][BM];
+  __shared__ __align__(16) float Bs[BK][BN];
 
-  // Determine the row and column in the global matrix C. 
-  // threadIdx.x is multiplied by 4 because each thread processes 4 elements (a float4).
-  int row = blockIdx.y * TILE_SIZE + threadIdx.y;
-  int col = blockIdx.x * TILE_SIZE + threadIdx.x * 4;
+  const int blockRow = blockIdx.y * BM;
+  const int blockCol = blockIdx.x * BN;
 
-  // Accumulator for 4 output elements, stored in thread-local registers
-  float4 acc = {0.0f, 0.0f, 0.0f, 0.0f};
+  // Position of this thread's 8 x 8 output patch inside the block tile.
+  const int threadRow = threadIdx.x / (BN / TN);  // 0..15
+  const int threadCol = threadIdx.x % (BN / TN);  // 0..15
 
-  for (int tileIdx = 0; tileIdx < K / TILE_SIZE; ++tileIdx) {
-    int aRow = row;
-    int aCol = tileIdx * TILE_SIZE + threadIdx.x;
-    int bRow = tileIdx * TILE_SIZE + threadIdx.y;
-    int bCol = col;
+  // Which float4 of the A tile and of the B tile this thread loads.
+  const int aRow = threadIdx.x / (BK / 4);        // 0..127
+  const int aCol = (threadIdx.x % (BK / 4)) * 4;  // 0 or 4
+  const int bRow = threadIdx.x / (BN / 4);        // 0..7
+  const int bCol = (threadIdx.x % (BN / 4)) * 4;  // 0, 4, ..., 124
 
-    // Load 1 float from A into shared memory
-    if (aRow < M && aCol < K)
-      tileA[threadIdx.y][threadIdx.x] = A[aRow * K + aCol];
-    else
-      tileA[threadIdx.y][threadIdx.x] = 0.0f;
+  float acc[TM][TN] = {};
+  float regM[TM];
+  float regN[TN];
 
-    // Load 4 floats (one float4) from B into shared memory using vectorized load
-    if (bRow < K && bCol + 3 < N)
-      tileB[threadIdx.y][threadIdx.x] =
-          *(reinterpret_cast<const float4 *>(&B[bRow * N + bCol]));
-    else
-      tileB[threadIdx.y][threadIdx.x] = make_float4(0, 0, 0, 0);
+  for (int k0 = 0; k0 < K; k0 += BK) {
+    // ---- Global -> shared, one 128-bit load each for A and B. ----
+    // Since K % 4 == 0 and aCol % 4 == 0, either all four values of the
+    // float4 are inside the matrix or none are, so one bounds check covers
+    // the whole vector. The same holds for B with N % 4 == 0.
+    const int gRowA = blockRow + aRow;
+    const int gColA = k0 + aCol;
+    float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (gRowA < M && gColA < K) {
+      a = load_float4(&A[static_cast<size_t>(gRowA) * K + gColA]);
+    }
+    // Transpose while storing: the four consecutive K values of one A row go
+    // to four different rows of As.
+    As[aCol + 0][aRow] = a.x;
+    As[aCol + 1][aRow] = a.y;
+    As[aCol + 2][aRow] = a.z;
+    As[aCol + 3][aRow] = a.w;
+
+    const int gRowB = k0 + bRow;
+    const int gColB = blockCol + bCol;
+    float4 b = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (gRowB < K && gColB < N) {
+      b = load_float4(&B[static_cast<size_t>(gRowB) * N + gColB]);
+    }
+    *reinterpret_cast<float4 *>(&Bs[bRow][bCol]) = b;
 
     __syncthreads();
 
-    // Compute dot product for the current tile
-    for (int k = 0; k < TILE_SIZE; ++k) {
-      float aVal = tileA[threadIdx.y][k];
-      float4 bVal = tileB[k][threadIdx.x];
-      // Broadcast aVal to all 4 elements of bVal
-      acc.x += aVal * bVal.x;
-      acc.y += aVal * bVal.y;
-      acc.z += aVal * bVal.z;
-      acc.w += aVal * bVal.w;
+    // ---- Shared -> registers -> 64 FMAs per k, as in the previous stage. ----
+#pragma unroll
+    for (int k = 0; k < BK; ++k) {
+      // Thanks to the transposed layout, this thread's 8 A values for this k
+      // are contiguous: two float4 loads instead of eight scalar loads.
+#pragma unroll
+      for (int i = 0; i < TM; i += 4) {
+        const float4 t = load_float4(&As[k][threadRow * TM + i]);
+        regM[i + 0] = t.x;
+        regM[i + 1] = t.y;
+        regM[i + 2] = t.z;
+        regM[i + 3] = t.w;
+      }
+#pragma unroll
+      for (int j = 0; j < TN; j += 4) {
+        const float4 t = load_float4(&Bs[k][threadCol * TN + j]);
+        regN[j + 0] = t.x;
+        regN[j + 1] = t.y;
+        regN[j + 2] = t.z;
+        regN[j + 3] = t.w;
+      }
+#pragma unroll
+      for (int i = 0; i < TM; ++i) {
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+          acc[i][j] += regM[i] * regN[j];
+        }
+      }
     }
 
     __syncthreads();
   }
 
-  if (row < M && col + 3 < N) {
-    // Read the existing 4 elements of C using a vectorized load
-    float4 existing_C =
-        *(reinterpret_cast<const float4 *>(&C[row * N + col]));
-        
-    // C = α*(A@B)+β*C applied to all 4 elements
-    acc.x = alpha * acc.x + beta * existing_C.x;
-    acc.y = alpha * acc.y + beta * existing_C.y;
-    acc.z = alpha * acc.z + beta * existing_C.z;
-    acc.w = alpha * acc.w + beta * existing_C.w;
-    
-    // Store the 4 updated elements back to C using a vectorized store
-    *(reinterpret_cast<float4 *>(&C[row * N + col])) = acc;
-  }
-}
-
-void cpu_gemm(int M, int N, int K, float alpha, const float *A, const float *B,
-              float beta, float *C) {
-  for (int x = 0; x < M; ++x)
-    for (int y = 0; y < N; ++y) {
-      float tmp = 0.0f;
-      for (int i = 0; i < K; ++i)
-        tmp += A[x * K + i] * B[i * N + y];
-      C[x * N + y] = alpha * tmp + beta * C[x * N + y];
-    }
-}
-
-bool nearly_equal(float a, float b, float eps = 1e-4f) {
-  return std::fabs(a - b) < eps;
-}
-
-int main() {
-  const int M = 1024, N = 1024, K = 1024;
-  float alpha = 1.0f, beta = 0.0f;
-
-  std::vector<float> A(M * K), B(K * N), C_cpu(M * N), C_gpu(M * N);
-
-  for (int i = 0; i < M * K; ++i)
-    A[i] = static_cast<float>(i % 13);
-  for (int i = 0; i < K * N; ++i)
-    B[i] = static_cast<float>((i % 7) - 3);
-  for (int i = 0; i < M * N; ++i) {
-    C_cpu[i] = 1.0f;
-    C_gpu[i] = 1.0f;
-  }
-
-  std::cout << "Running CPU validation..." << std::endl;
-  cpu_gemm(M, N, K, alpha, A.data(), B.data(), beta, C_cpu.data());
-
-  float *dA, *dB, *dC;
-  CHECK(cudaMalloc(&dA, A.size() * sizeof(float)));
-  CHECK(cudaMalloc(&dB, B.size() * sizeof(float)));
-  CHECK(cudaMalloc(&dC, C_gpu.size() * sizeof(float)));
-
-  CHECK(cudaMemcpy(dA, A.data(), A.size() * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dB, B.data(), B.size() * sizeof(float), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dC, C_gpu.data(), C_gpu.size() * sizeof(float),
-                   cudaMemcpyHostToDevice));
-
-  dim3 blockSize(TILE_SIZE, TILE_SIZE);
-  // Grid is sized for float4 operations
-  dim3 gridSize(CEIL_DIV(N / 4, TILE_SIZE), CEIL_DIV(M, TILE_SIZE), 1);
-
-  cudaEvent_t start, stop;
-  CHECK(cudaEventCreate(&start));
-  CHECK(cudaEventCreate(&stop));
-
-  CHECK(cudaEventRecord(start));
-  sgemm_vectorized<<<gridSize, blockSize>>>(M, N, K, alpha, dA, dB, beta, dC);
-  CHECK(cudaEventRecord(stop));
-
-  CHECK(cudaGetLastError());
-  CHECK(cudaEventSynchronize(stop));
-
-  float ms = 0.0f;
-  CHECK(cudaEventElapsedTime(&ms, start, stop));
-  std::cout << "Kernel Execution Time (Vectorized): " << ms << " ms\n";
-
-  CHECK(cudaEventDestroy(start));
-  CHECK(cudaEventDestroy(stop));
-
-  CHECK(cudaMemcpy(C_gpu.data(), dC, C_gpu.size() * sizeof(float),
-                   cudaMemcpyDeviceToHost));
-
-  bool pass = true;
-  for (int i = 0; i < M * N; ++i) {
-    if (!nearly_equal(C_cpu[i], C_gpu[i], 1e-3f)) { // Higher tolerance for FP32
-      std::cerr << "Mismatch at " << i << ": CPU=" << C_cpu[i]
-                << ", GPU=" << C_gpu[i] << std::endl;
-      pass = false;
-      break;
+  // ---- Epilogue: C = alpha * acc + beta * C with float4 reads and writes. ----
+#pragma unroll
+  for (int i = 0; i < TM; ++i) {
+    const int row = blockRow + threadRow * TM + i;
+#pragma unroll
+    for (int j = 0; j < TN; j += 4) {
+      const int col = blockCol + threadCol * TN + j;
+      if (row < M && col < N) {  // N % 4 == 0, so col < N covers col + 3.
+        float4 *c_ptr =
+            reinterpret_cast<float4 *>(&C[static_cast<size_t>(row) * N + col]);
+        float4 c = *c_ptr;
+        c.x = alpha * acc[i][j + 0] + beta * c.x;
+        c.y = alpha * acc[i][j + 1] + beta * c.y;
+        c.z = alpha * acc[i][j + 2] + beta * c.z;
+        c.w = alpha * acc[i][j + 3] + beta * c.w;
+        *c_ptr = c;
+      }
     }
   }
-  if (pass) {
-    std::cout << "Validation PASSED!" << std::endl;
-  }
+}
 
-  CHECK(cudaFree(dA));
-  CHECK(cudaFree(dB));
-  CHECK(cudaFree(dC));
+void launch_sgemm_vectorized(int M, int N, int K, float alpha, const float *A,
+                             const float *B, float beta, float *C) {
+  dim3 grid(lab::ceil_div(N, BN), lab::ceil_div(M, BM));
+  sgemm_vectorized<<<grid, NUM_THREADS>>>(M, N, K, alpha, A, B, beta, C);
+}
 
-  return 0;
+int main(int argc, char **argv) {
+  GemmRequirements req;
+  req.n_multiple = 4;
+  req.k_multiple = 4;
+  return run_gemm<float>("Vectorized (float4)", argc, argv, {1024, 1024, 1024},
+                         {257, 132, 100}, launch_sgemm_vectorized, req);
 }

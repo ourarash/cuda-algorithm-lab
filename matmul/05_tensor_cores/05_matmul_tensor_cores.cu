@@ -2,187 +2,107 @@
  * Tensor Core Matrix Multiplication
  *
  * Intention:
- * This file demonstrates how to move from custom CUDA cores to NVIDIA Tensor
- * Cores through the WMMA API.
+ * This file demonstrates how to move from CUDA cores to NVIDIA Tensor Cores
+ * through the WMMA (warp matrix multiply-accumulate) API.
  *
  * High-Level Algorithm:
- * - Assign each warp to one 16x16 output tile.
- * - Load 16x16 fragments of A and B into WMMA fragments.
- * - Let the hardware perform matrix multiply-accumulate on Tensor Cores.
- * - Store the accumulated FP32 output fragment back to global memory.
+ * - Each warp computes one 16x16 output tile of C. A block holds 4 warps
+ *   arranged 2x2, so it covers a 32x32 region of C.
+ * - Walk along K in steps of 16: load a 16x16 fragment of A and of B straight
+ *   from global memory and let the Tensor Cores perform C_tile += A * B.
+ * - Apply alpha and beta in registers, then store the FP32 tile.
+ *
+ * Precision: A and B are FP16, accumulation and C are FP32. The harness builds
+ * its CPU reference from the same half-rounded inputs, so the check measures
+ * the GPU's arithmetic, not the input rounding.
+ *
+ * Requirements:
+ * - Tensor Core WMMA for FP16 needs compute capability 7.0 or newer. CUDA 13
+ *   only targets 7.5 (Turing) and newer anyway.
+ * - M, N, and K must be multiples of 16, because load_matrix_sync always reads
+ *   a full 16x16 fragment.
+ *
+ * This is the simplest correct WMMA kernel, not a fast one: it has no shared
+ * memory staging, so each fragment is re-read from global memory by every
+ * warp that needs it. The roadmap's next steps add shared-memory tiling,
+ * mma.sync with ldmatrix, and Hopper's TMA + WGMMA.
  */
-#include <cmath>
-#include <cstdlib>
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
 #include <mma.h>
-#include <iostream>
-#include <vector>
+
+#include "../gemm_harness.cuh"
 
 using namespace nvcuda;
 
-#define CHECK(call)                                                            \
-  do {                                                                         \
-    cudaError_t err = call;                                                    \
-    if (err != cudaSuccess) {                                                  \
-      std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << ": "     \
-                << cudaGetErrorString(err) << std::endl;                       \
-      exit(1);                                                                 \
-    }                                                                          \
-  } while (0)
-
-#define CEIL_DIV(x, y) (((x) + (y)-1) / (y))
+constexpr int WMMA_M = 16;
+constexpr int WMMA_N = 16;
+constexpr int WMMA_K = 16;
+constexpr int WARPS_M = 2;  // Warps per block along M
+constexpr int WARPS_N = 2;  // Warps per block along N
+constexpr int WARP_SIZE = 32;
 
 /**
  * 6. Hardware Acceleration (WMMA API / Tensor Cores)
- * This version targets NVIDIA's specialized Tensor Cores. It uses the Warp Matrix 
- * Multiply-Accumulate (WMMA) API to program an entire warp (32 threads) to natively
- * execute mixed-precision (FP16 inputs to FP32 accumulate) matrix operations.
+ * The WMMA API programs an entire warp (32 threads) to cooperatively execute
+ * a 16x16x16 mixed-precision matrix multiply-accumulate on Tensor Cores.
  */
-__global__ void sgemm_wmma(int M, int N, int K, float alpha, const half *A,
-                         const half *B, float beta, float *C) {
-  // WMMA fragment dimensions
-  const int WMMA_M = 16;
-  const int WMMA_N = 16;
-  const int WMMA_K = 16;
+__global__ void hgemm_wmma(int M, int N, int K, float alpha, const half *A,
+                           const half *B, float beta, float *C) {
+  // Which 16x16 tile of C this warp owns. All 32 threads of a warp compute
+  // the same warpId, so the early return below is uniform across the warp,
+  // which the *_sync WMMA calls require.
+  const int warpId = threadIdx.x / WARP_SIZE;
+  const int tileRow = blockIdx.y * WARPS_M + warpId / WARPS_N;
+  const int tileCol = blockIdx.x * WARPS_N + warpId % WARPS_N;
+  const int cRow = tileRow * WMMA_M;
+  const int cCol = tileCol * WMMA_N;
+  if (cRow >= M || cCol >= N) {
+    return;
+  }
 
-  // Identify which tile of C this warp is computing
-  int tileRow = blockIdx.y; // row tile index of C
-  int tileCol = blockIdx.x; // col tile index of C
+  // Fragments are register tiles distributed across the 32 threads of the
+  // warp. matrix_a and matrix_b hold FP16 inputs; the accumulator is FP32.
+  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>
+      a_frag;
+  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major>
+      b_frag;
+  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc_frag;
+  wmma::fill_fragment(acc_frag, 0.0f);
 
-  // Declare fragments (register-level tiles distributed across the threads in a warp)
-  // matrix_a and matrix_b store inputs (FP16), accumulator stores the result (FP32)
-  wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag;
-  wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> b_frag;
-  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
-
-  // Initialize output fragment to zero
-  wmma::fill_fragment(c_frag, 0.0f);
-
-  // Loop over K dimension in chunks of WMMA_K
   for (int k = 0; k < K; k += WMMA_K) {
-    // Compute base indices in A and B for this tile
-    int a_row = tileRow * WMMA_M;
-    int a_col = k;
-    int b_row = k;
-    int b_col = tileCol * WMMA_N;
+    // Load 16x16 tiles from global memory directly into the fragments. The
+    // last argument is the leading dimension (row length) of the matrix.
+    wmma::load_matrix_sync(a_frag, A + cRow * K + k, K);
+    wmma::load_matrix_sync(b_frag, B + k * N + cCol, N);
 
-    // Bounds checking before loading
-    if (a_row < M && a_col < K && b_row < K && b_col < N) {
-      // Load 16x16 tiles from global memory directly into the hardware fragments
-      wmma::load_matrix_sync(a_frag, A + a_row * K + a_col, K);
-      wmma::load_matrix_sync(b_frag, B + b_row * N + b_col, N);
-
-      // Perform hardware-accelerated matrix multiply-accumulate: C += A * B
-      wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
-    }
+    // Tensor Core multiply-accumulate: acc += A_tile * B_tile.
+    wmma::mma_sync(acc_frag, a_frag, b_frag, acc_frag);
   }
 
-  // --- Store the output fragment to global memory ---
-  int c_row = tileRow * WMMA_M;
-  int c_col = tileCol * WMMA_N;
-
-  if (c_row < M && c_col < N) {
-    // Load existing C tile into a fragment for the beta scaling
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> existing_c_frag;
-    wmma::load_matrix_sync(existing_c_frag, C + c_row * N + c_col, N, wmma::mem_row_major);
-
-    // Apply α and β scaling to each element in the fragment
-    // C = α*(A@B)+β*C
-    for(int i=0; i<existing_c_frag.num_elements; i++) {
-        existing_c_frag.x[i] = alpha * c_frag.x[i] + beta * existing_c_frag.x[i];
-    }
-    
-    // Store the final computed fragment back to global memory
-    wmma::store_matrix_sync(C + c_row * N + c_col, existing_c_frag, N, wmma::mem_row_major);
+  // C = alpha * acc + beta * C. The mapping of fragment elements to matrix
+  // positions is unspecified, but it is the same for two fragments of the
+  // same type, so element-wise math between them is valid.
+  wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
+  wmma::load_matrix_sync(c_frag, C + cRow * N + cCol, N, wmma::mem_row_major);
+  for (int i = 0; i < c_frag.num_elements; i++) {
+    c_frag.x[i] = alpha * acc_frag.x[i] + beta * c_frag.x[i];
   }
+  wmma::store_matrix_sync(C + cRow * N + cCol, c_frag, N, wmma::mem_row_major);
 }
 
-void cpu_gemm(int M, int N, int K, float alpha, const float *A, const float *B,
-              float beta, float *C) {
-  for (int x = 0; x < M; ++x)
-    for (int y = 0; y < N; ++y) {
-      float tmp = 0.0f;
-      for (int i = 0; i < K; ++i)
-        tmp += A[x * K + i] * B[i * N + y];
-      C[x * N + y] = alpha * tmp + beta * C[x * N + y];
-    }
+void launch_hgemm_wmma(int M, int N, int K, float alpha, const half *A,
+                       const half *B, float beta, float *C) {
+  dim3 block(WARPS_M * WARPS_N * WARP_SIZE);  // 4 warps = 128 threads
+  dim3 grid(lab::ceil_div(N, WARPS_N * WMMA_N), lab::ceil_div(M, WARPS_M * WMMA_M));
+  hgemm_wmma<<<grid, block>>>(M, N, K, alpha, A, B, beta, C);
 }
 
-bool nearly_equal(float a, float b, float eps = 1e-3f) { // Higher tolerance for mixed-precision
-  return std::fabs(a - b) < eps;
-}
-
-int main() {
-  const int M = 1024, N = 1024, K = 1024;
-  const int WMMA_M = 16, WMMA_N = 16;
-  float alpha = 1.0f, beta = 0.0f;
-
-  std::vector<float> A(M * K), B(K * N), C_cpu(M * N), C_gpu(M * N);
-  std::vector<half> A_half(M * K), B_half(K * N);
-
-  for (int i = 0; i < M * K; ++i) A[i] = static_cast<float>(i % 13);
-  for (int i = 0; i < K * N; ++i) B[i] = static_cast<float>((i % 7) - 3);
-  for (int i = 0; i < M * N; ++i) {
-    C_cpu[i] = 1.0f;
-    C_gpu[i] = 1.0f;
-  }
-
-  // Convert float to half for GPU input
-  for(int i=0; i < M*K; ++i) A_half[i] = __float2half(A[i]);
-  for(int i=0; i < K*N; ++i) B_half[i] = __float2half(B[i]);
-
-  std::cout << "Running CPU validation..." << std::endl;
-  cpu_gemm(M, N, K, alpha, A.data(), B.data(), beta, C_cpu.data());
-
-  half *dA, *dB;
-  float *dC;
-  CHECK(cudaMalloc(&dA, A_half.size() * sizeof(half)));
-  CHECK(cudaMalloc(&dB, B_half.size() * sizeof(half)));
-  CHECK(cudaMalloc(&dC, C_gpu.size() * sizeof(float)));
-
-  CHECK(cudaMemcpy(dA, A_half.data(), A_half.size() * sizeof(half), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dB, B_half.data(), B_half.size() * sizeof(half), cudaMemcpyHostToDevice));
-  CHECK(cudaMemcpy(dC, C_gpu.data(), C_gpu.size() * sizeof(float), cudaMemcpyHostToDevice));
-
-  dim3 gridDim(CEIL_DIV(N, WMMA_N), CEIL_DIV(M, WMMA_M), 1);
-  dim3 blockDim(32, 8, 1); // 256 threads, 8 warps
-
-  cudaEvent_t start, stop;
-  CHECK(cudaEventCreate(&start));
-  CHECK(cudaEventCreate(&stop));
-
-  CHECK(cudaEventRecord(start));
-  sgemm_wmma<<<gridDim, blockDim>>>(M, N, K, alpha, dA, dB, beta, dC);
-  CHECK(cudaEventRecord(stop));
-
-  CHECK(cudaGetLastError());
-  CHECK(cudaEventSynchronize(stop));
-
-  float ms = 0.0f;
-  CHECK(cudaEventElapsedTime(&ms, start, stop));
-  std::cout << "Kernel Execution Time (Tensor Cores): " << ms << " ms\n";
-
-  CHECK(cudaEventDestroy(start));
-  CHECK(cudaEventDestroy(stop));
-
-  CHECK(cudaMemcpy(C_gpu.data(), dC, C_gpu.size() * sizeof(float), cudaMemcpyDeviceToHost));
-
-  bool pass = true;
-  for (int i = 0; i < M * N; ++i) {
-    if (!nearly_equal(C_cpu[i], C_gpu[i])) {
-      std::cerr << "Mismatch at " << i << ": CPU=" << C_cpu[i]
-                << ", GPU=" << C_gpu[i] << std::endl;
-      pass = false;
-      break;
-    }
-  }
-  if (pass) {
-    std::cout << "Validation PASSED!" << std::endl;
-  }
-
-  CHECK(cudaFree(dA));
-  CHECK(cudaFree(dB));
-  CHECK(cudaFree(dC));
-  return 0;
+int main(int argc, char **argv) {
+  GemmRequirements req;
+  req.m_multiple = WMMA_M;
+  req.n_multiple = WMMA_N;
+  req.k_multiple = WMMA_K;
+  // The quick shape leaves some warps without a tile (M = 144 is 4.5 blocks
+  // of 32 rows), which exercises the early return.
+  return run_gemm<half>("Tensor cores (WMMA)", argc, argv, {1024, 1024, 1024},
+                        {144, 80, 48}, launch_hgemm_wmma, req);
 }
