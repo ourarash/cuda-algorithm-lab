@@ -1,5 +1,11 @@
 # CUDA Algorithm Lab
 
+[![build](https://github.com/ourarash/cuda-algorithm-lab/actions/workflows/build.yml/badge.svg)](https://github.com/ourarash/cuda-algorithm-lab/actions/workflows/build.yml)
+[![CUDA 12.8 | 13.3](https://img.shields.io/badge/CUDA-12.8%20%7C%2013.3-76B900?logo=nvidia&logoColor=white)](https://github.com/ourarash/cuda-algorithm-lab/actions/workflows/build.yml)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/17)
+[![CMake 3.24+](https://img.shields.io/badge/CMake-3.24%2B-064F8C?logo=cmake&logoColor=white)](CMakeLists.txt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Lightweight CUDA examples for learning how GPU algorithms evolve from simple
 versions to better ones.
 
