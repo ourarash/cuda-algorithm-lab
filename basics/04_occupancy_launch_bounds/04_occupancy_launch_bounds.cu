@@ -10,11 +10,13 @@
  * it.
  *
  * High-Level Algorithm:
- * - work(): each thread keeps 32 running values in registers, so the
+ * - work(): each thread keeps 64 running values in registers, so the
  *   compiler needs many registers per thread.
- * - work_bounded(): the same code with __launch_bounds__(256, 8), which tells
- *   the compiler "256 threads per block, and I want 8 blocks per SM". To fit,
- *   it must cap registers per thread and spill the rest to local memory.
+ * - work_bounded(): the same code with __launch_bounds__(256, 4), which tells
+ *   the compiler "256 threads per block, and I want at least 4 blocks per SM"
+ *   (1024 threads, valid on every GPU since Turing). With 65536 registers per
+ *   SM that allows at most 64 registers per thread, so the compiler must cap
+ *   its register use and spill the rest to local memory.
  * - For both, print registers per thread (cudaFuncGetAttributes), resident
  *   blocks per SM and occupancy (cudaOccupancyMaxActiveBlocksPerMultiprocessor),
  *   the block size the runtime suggests (cudaOccupancyMaxPotentialBlockSize),
@@ -29,7 +31,7 @@
 #include "lab.cuh"
 
 constexpr int THREADS = 256;
-constexpr int VALUES = 32;
+constexpr int VALUES = 64;
 
 template <int Dummy>
 __device__ __forceinline__ float body(const float *in, int i, int n) {
@@ -51,7 +53,7 @@ __global__ void work(const float *in, float *out, int n) {
   if (i < n) out[i] = body<0>(in, i, n);
 }
 
-__global__ void __launch_bounds__(THREADS, 8)
+__global__ void __launch_bounds__(THREADS, 4)
     work_bounded(const float *in, float *out, int n) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) out[i] = body<1>(in, i, n);
