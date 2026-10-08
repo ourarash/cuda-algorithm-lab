@@ -68,6 +68,9 @@ constexpr int CHUNK = 8;                 // halves per 16-byte chunk
 constexpr int A_CHUNKS_PER_ROW = BK / CHUNK;  // 4
 constexpr int B_CHUNKS_PER_ROW = BN / CHUNK;  // 16
 
+static_assert(MI * MMA_M == WARP_TILE_M && NJ * MMA_N == WARP_TILE_N,
+              "MMA tiles exactly cover the warp tile");
+static_assert(BK % MMA_K == 0 && STAGES == 2, "K tile and double buffering");
 static_assert(A_CHUNKS_PER_ROW == 4, "A swizzle below assumes 4 chunks/row");
 static_assert(B_CHUNKS_PER_ROW % 8 == 0, "B swizzle below permutes 8 chunks");
 static_assert(NJ % 2 == 0, "B is loaded two n8 tiles per ldmatrix.x4");
