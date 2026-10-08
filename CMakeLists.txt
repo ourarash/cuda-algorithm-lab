@@ -23,14 +23,20 @@ find_program(COMPUTE_SANITIZER compute-sanitizer HINTS "${CUDAToolkit_BIN_DIR}")
 
 enable_testing()
 
-# lab_example(<topic>/<...>/<name>.cu [LIBRARIES <targets>...])
+# Exit code an example returns when this GPU cannot run it (for example, a
+# Hopper-only kernel on an Ampere GPU). ctest reports it as skipped.
+set(LAB_SKIP_RETURN_CODE 77)
+
+# lab_example(<topic>/<...>/<name>.cu [LIBRARIES <targets>...] [GENCODE <spec>])
 #
 # Builds one example into build/bin/<topic>/<name> and registers tests:
 #   <topic>-<name>             label "run":       full-size run, must PASS
 #   <topic>-<name>.memcheck    label "memcheck":  compute-sanitizer, --quick
 #   <topic>-<name>.racecheck   label "racecheck": compute-sanitizer, --quick
+# GENCODE replaces CMAKE_CUDA_ARCHITECTURES for examples that need an
+# architecture-specific target such as "arch=compute_90a,code=sm_90a".
 function(lab_example source)
-  cmake_parse_arguments(ARG "" "" "LIBRARIES" ${ARGN})
+  cmake_parse_arguments(ARG "" "GENCODE" "LIBRARIES" ${ARGN})
 
   get_filename_component(name "${source}" NAME_WE)
   string(REGEX MATCH "^[^/]+" topic "${source}")
@@ -42,19 +48,26 @@ function(lab_example source)
   target_link_libraries(${target} PRIVATE ${ARG_LIBRARIES})
   # -lineinfo lets Nsight Compute map metrics back to source lines.
   target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  if(ARG_GENCODE)
+    set_target_properties(${target} PROPERTIES CUDA_ARCHITECTURES OFF)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CUDA>:-gencode=${ARG_GENCODE}>)
+  endif()
   set_target_properties(${target} PROPERTIES
     OUTPUT_NAME "${name}"
     RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin/${topic}")
 
   add_test(NAME ${target} COMMAND ${target})
-  set_tests_properties(${target} PROPERTIES LABELS run)
+  set_tests_properties(${target} PROPERTIES
+    LABELS run SKIP_RETURN_CODE ${LAB_SKIP_RETURN_CODE})
 
   if(COMPUTE_SANITIZER)
     foreach(tool memcheck racecheck)
       add_test(NAME ${target}.${tool}
                COMMAND ${COMPUTE_SANITIZER} --tool ${tool} --error-exitcode 1
                        $<TARGET_FILE:${target}> --quick)
-      set_tests_properties(${target}.${tool} PROPERTIES LABELS ${tool})
+      set_tests_properties(${target}.${tool} PROPERTIES
+        LABELS ${tool} SKIP_RETURN_CODE ${LAB_SKIP_RETURN_CODE})
     endforeach()
   endif()
 endfunction()
@@ -73,7 +86,18 @@ lab_example(warp/00_shuffle_intrinsics/00_shuffle_intrinsics.cu)
 
 # reduction
 lab_example(reduction/00_naive/00_reduction_naive.cu)
-lab_example(reduction/01_shared/01_reduction_shared.cu)
+lab_example(reduction/01_interleaved_divergent/01_reduction_interleaved_divergent.cu)
+lab_example(reduction/02_interleaved_bank_conflicts/02_reduction_interleaved_bank_conflicts.cu)
+lab_example(reduction/03_sequential_addressing/03_reduction_sequential_addressing.cu)
+lab_example(reduction/04_first_add_during_load/04_reduction_first_add_during_load.cu)
+lab_example(reduction/05_unroll_last_warp/05_reduction_unroll_last_warp.cu)
+lab_example(reduction/06_complete_unroll/06_reduction_complete_unroll.cu)
+lab_example(reduction/07_grid_stride/07_reduction_grid_stride.cu)
+lab_example(reduction/08_warp_shuffle/08_reduction_warp_shuffle.cu)
+lab_example(reduction/09_cooperative_groups/09_reduction_cooperative_groups.cu)
+lab_example(reduction/10_single_pass/10_reduction_single_pass.cu)
+lab_example(reduction/11_vectorized/11_reduction_vectorized.cu)
+lab_example(reduction/12_cub/12_reduction_cub.cu)
 
 # scan
 lab_example(scan/00_kogge_stone/00_scan_kogge_stone.cu)
@@ -84,26 +108,36 @@ lab_example(scan/04_blelloch_bank_conflict_free/04_scan_blelloch_bank_conflict_f
 lab_example(scan/05_multiblock_cpu_fixup/05_scan_multiblock_cpu_fixup.cu)
 lab_example(scan/06_multiblock_gpu_fixup/06_scan_multiblock_gpu_fixup.cu)
 
-# matmul
-lab_example(matmul/00_uncoalesced/00_matmul_uncoalesced.cu)
-lab_example(matmul/01_coalesced/01_matmul_coalesced.cu)
-lab_example(matmul/02_shared_memory/02_matmul_shared_memory.cu)
-lab_example(matmul/03_register_tiling/03_matmul_register_tiling.cu)
-lab_example(matmul/03_register_tiling/04_matmul_2d_register_tiling.cu)
-lab_example(matmul/04_vectorized/04_matmul_vectorized.cu)
-lab_example(matmul/05_tensor_cores/05_matmul_tensor_cores.cu)
+# matmul (every stage prints cuBLAS as its baseline)
+lab_example(matmul/00_uncoalesced/00_matmul_uncoalesced.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/01_coalesced/01_matmul_coalesced.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/02_shared_memory/02_matmul_shared_memory.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/03_1d_register_tiling/03_matmul_1d_register_tiling.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/04_2d_register_tiling/04_matmul_2d_register_tiling.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/05_vectorized/05_matmul_vectorized.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/06_warptiling/06_matmul_warptiling.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/07_double_buffering/07_matmul_double_buffering.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/08_tensor_cores_wmma/08_matmul_wmma.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/09_wmma_shared_memory/09_matmul_wmma_shared_memory.cu LIBRARIES CUDA::cublas)
+lab_example(matmul/10_mma_sync/10_matmul_mma_sync.cu LIBRARIES CUDA::cublas)
+# Hopper wgmma/TMA code must be compiled for the architecture-specific
+# sm_90a target, which CUDA 12.0 introduced.
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.0)
+  lab_example(matmul/11_hopper_wgmma_tma/11_matmul_hopper_wgmma.cu
+              GENCODE arch=compute_90a,code=sm_90a
+              LIBRARIES CUDA::cublas CUDA::cuda_driver)
+endif()
 
 # matrix_transpose
-lab_example(matrix_transpose/00_transpose_bank_conflicts.cu)
-
-# libraries
-lab_example(libraries/00_cublas_gemm/00_cublas_gemm.cu LIBRARIES CUDA::cublas)
+lab_example(matrix_transpose/00_copy/00_transpose_copy.cu)
+lab_example(matrix_transpose/01_naive/01_transpose_naive.cu)
+lab_example(matrix_transpose/02_shared_memory/02_transpose_shared_memory.cu)
+lab_example(matrix_transpose/03_padded/03_transpose_padded.cu)
+lab_example(matrix_transpose/04_swizzled/04_transpose_swizzled.cu)
 
 # sort
 lab_example(sort/00_counting_sort/00_counting_sort.cu)
 lab_example(sort/01_merge_sort/01_merge_sort.cu)
-lab_example(sort/02_epsilon_sort_thrust/02_epsilon_sort_thrust.cu)
-lab_example(sort/03_epsilon_sort_manual/03_epsilon_sort_manual.cu)
 
 # sparse
 lab_example(sparse/00_spmv_coo/00_spmv_coo.cu)
@@ -111,8 +145,11 @@ lab_example(sparse/01_spmv_csr/01_spmv_csr.cu)
 lab_example(sparse/02_spmv_ell/02_spmv_ell.cu)
 lab_example(sparse/03_spgemm_cusparse/03_spgemm_cusparse.cu LIBRARIES CUDA::cusparse)
 
-# xor
-lab_example(xor/00_set_symmetric_difference/00_xor_set_symmetric_difference.cu)
+# libraries
+lab_example(libraries/00_cublas_gemm/00_cublas_gemm.cu LIBRARIES CUDA::cublas)
+lab_example(libraries/01_thrust_set_symmetric_difference/01_thrust_set_symmetric_difference.cu)
 
-# optimization
-lab_example(optimization/00_ant_colony_tsp/00_ant_colony_tsp.cu)
+# applications
+lab_example(applications/00_ant_colony_tsp/00_ant_colony_tsp.cu)
+lab_example(applications/01_epsilon_sort_thrust/01_epsilon_sort_thrust.cu)
+lab_example(applications/02_epsilon_sort_manual/02_epsilon_sort_manual.cu)

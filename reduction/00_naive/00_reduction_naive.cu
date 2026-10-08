@@ -25,14 +25,15 @@
  *   it would still suffer from massive global memory latency, which is why the next real
  *   optimization leap is to move to shared memory entirely.
  *
- * The block partial sums are added up on the host. The input size is
- * deliberately not a multiple of the 2 * BLOCK_SIZE elements each block
- * handles, so the bounds checks in the kernel are exercised.
+ * Each pass turns n values into one partial sum per block; the launcher
+ * repeats passes until one value remains, so the whole reduction runs on the
+ * GPU. The input sizes are deliberately not multiples of the 2 * BLOCK_SIZE
+ * elements each block handles, so the bounds checks are exercised.
+ *
+ * The host-side driver (inputs, validation, timing) lives in
+ * ../reduction_harness.cuh and is shared by every step in this folder.
  */
-#include <cstdio>
-#include <vector>
-
-#include "lab.cuh"
+#include "../reduction_harness.cuh"
 
 #define BLOCK_SIZE 256  // Number of threads per block
 
@@ -77,52 +78,13 @@ __global__ void reduction(float *input, float *partialSums, unsigned int N) {
   }
 }
 
+void launch_reduction(float *d_in, int n, float *d_out, float *d_scratch) {
+  reduce_in_passes(d_in, n, d_out, d_scratch, 2 * BLOCK_SIZE,
+                   [](float *src, float *dst, int count, int blocks) {
+                     reduction<<<blocks, BLOCK_SIZE>>>(src, dst, count);
+                   });
+}
+
 int main(int argc, char **argv) {
-  lab::Args args(argc, argv);
-  const unsigned int N = static_cast<unsigned int>(
-      args.get_int("n", args.quick() ? 100003 : (1 << 24) + 123));
-  const unsigned int numBlocks = lab::ceil_div(N, 2u * BLOCK_SIZE);
-
-  lab::print_device();
-  printf("Naive reduction of %u floats\n", N);
-
-  const std::vector<float> h_input = lab::random_uniform<float>(N, 0.f, 1.f, 7);
-  float *d_input, *d_partialSums;
-  CUDA_CHECK(cudaMalloc(&d_input, N * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_partialSums, numBlocks * sizeof(float)));
-  CUDA_CHECK(cudaMemcpy(d_input, h_input.data(), N * sizeof(float),
-                        cudaMemcpyHostToDevice));
-
-  reduction<<<numBlocks, BLOCK_SIZE>>>(d_input, d_partialSums, N);
-  CUDA_CHECK_LAUNCH();
-
-  // Add the block partial sums on the host. Double precision keeps this
-  // final step from adding error of its own.
-  std::vector<float> h_partialSums(numBlocks);
-  CUDA_CHECK(cudaMemcpy(h_partialSums.data(), d_partialSums,
-                        numBlocks * sizeof(float), cudaMemcpyDeviceToHost));
-  double gpu_sum = 0.0;
-  for (float partial : h_partialSums) {
-    gpu_sum += partial;
-  }
-
-  double cpu_sum = 0.0;
-  for (float x : h_input) {
-    cpu_sum += x;
-  }
-  printf("GPU sum: %.6f\nCPU sum: %.6f\n", gpu_sum, cpu_sum);
-  // Each block's tree adds up at most 2 * BLOCK_SIZE floats in 9 levels, so
-  // the relative error stays near 1e-7; a wrong index is off by far more.
-  const std::vector<double> got = {gpu_sum}, expected = {cpu_sum};
-  const bool pass = lab::check_close("sum", got, expected, 1e-5, 0.0);
-
-  // The kernel reduces in place, so timed runs operate on already-reduced
-  // data. The memory access pattern, and therefore the time, is the same.
-  const float ms = lab::time_ms(
-      [&] { reduction<<<numBlocks, BLOCK_SIZE>>>(d_input, d_partialSums, N); });
-  lab::report("naive reduction", ms, N, static_cast<double>(N) * sizeof(float));
-
-  CUDA_CHECK(cudaFree(d_input));
-  CUDA_CHECK(cudaFree(d_partialSums));
-  return lab::finish(pass);
+  return run_reduction("Naive (global memory)", argc, argv, launch_reduction);
 }

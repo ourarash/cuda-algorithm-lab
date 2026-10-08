@@ -15,9 +15,18 @@ visualizations to make the algorithm flow easier to follow.
 
 ## ✨ What You'll Find
 
-- Progressive CUDA examples with clear naming and folder structure
-- Topics like reduction, scan, matrix multiplication, sparse ops, sorting, and
-  warp-level programming
+- Three optimization ladders where every step changes one idea and reports
+  the number that proves it:
+  - [matmul/](matmul/): 12 GEMM steps, from a naive kernel through register
+    tiling, warptiling, and `cp.async` double buffering to Tensor Cores with
+    WMMA, raw `mma.sync` + `ldmatrix`, and Hopper TMA + WGMMA, each compared
+    with cuBLAS
+  - [reduction/](reduction/): 13 steps, Harris's classic sequence updated for
+    modern GPUs, then warp shuffles, cooperative groups, single-pass, `float4`,
+    and CUB
+  - [matrix_transpose/](matrix_transpose/): copy baseline, naive, shared
+    memory, padding, and swizzling
+- Topics like scan, sorting, sparse matrices, and warp-level programming
 - Interactive visualizations for selected algorithms
 - Short, readable CUDA files with top-of-file intent and algorithm summaries
 - Every example checks its own result and reports a meaningful performance
@@ -28,17 +37,21 @@ visualizations to make the algorithm flow easier to follow.
 - `basics/`: CUDA basics, thread hierarchy, vector add, runtime API examples
 - `memory/`: memory-management focused examples
 - `warp/`: warp shuffle and warp-level programming examples
-- `reduction/`: reduction kernels plus visualizations
+- `reduction/`: the reduction ladder ([README](reduction/README.md))
 - `scan/`: inclusive and exclusive scan algorithms, from simple to multi-block
-- `matmul/`: progressively better GEMM kernels and visual explanations
-- `matrix_transpose/`: shared-memory matrix transpose with bank-conflict avoidance
-- `libraries/`: library-based examples such as cuBLAS GEMM
-- `sort/`: sorting examples
-- `sparse/`: sparse matrix-vector (COO, CSR, ELL) and sparse matrix-matrix examples
-- `xor/`: set symmetric difference with Thrust
-- `optimization/`: larger optimization-oriented experiments
+  ([README](scan/README.md))
+- `matmul/`: the GEMM ladder ([README](matmul/README.md))
+- `matrix_transpose/`: the transpose ladder ([README](matrix_transpose/README.md))
+- `sort/`: counting sort and merge sort
+- `sparse/`: sparse matrix-vector (COO, CSR, ELL) and cuSPARSE sparse
+  matrix-matrix examples
+- `libraries/`: cuBLAS GEMM and a Thrust set-operations example
+- `applications/`: larger examples (ant colony optimization for the TSP,
+  approximate "epsilon" sorting)
 - `common/`: `lab.cuh`, the small shared header for error checking, timing,
   validation, and reporting
+- `tools/`: benchmark tables, roofline plot, visualization checks
+- `docs/`: a slide deck on the GEMM ladder and its generator
 
 See [roadmap.md](roadmap.md) for what is planned next.
 
@@ -78,13 +91,20 @@ and finishes with `PASS` or `FAIL`. The exit code is non-zero on failure.
 `--quick` switches to small, deliberately awkward sizes (for example, matrix
 dimensions that are not multiples of the tile size).
 
-Test and sanitize everything:
+Test, measure, and sanitize everything:
 
 ```bash
 make test       # run every example at full size; each must PASS
 make sanitize   # run every example under compute-sanitizer memcheck and racecheck
+make bench      # results tables for the matmul, reduction, and transpose ladders
+make roofline   # roofline plot of the GEMM ladder (matplotlib; uses ncu if installed)
+make check-viz  # smoke-test the HTML visualizations (Node.js)
 make clean      # delete build/
 ```
+
+Some examples need a particular GPU (for example, the Hopper GEMM needs
+compute capability 9.0). On other GPUs they print `SKIP` and exit with code 77,
+which `ctest` reports as skipped rather than failed.
 
 `make test` and `make sanitize` are thin wrappers around `ctest`, so you can
 also select examples directly, for example
@@ -102,10 +122,11 @@ If you're using this repo to learn, a good order is:
 
 1. `basics/`
 2. `reduction/`
-3. `scan/`
-4. `matmul/`
-5. `warp/`
-6. `sparse/`
+3. `matrix_transpose/`
+4. `scan/`
+5. `matmul/`
+6. `warp/`
+7. `sparse/`
 
 ## 🌐 Visualizations
 
@@ -113,10 +134,12 @@ Some folders include HTML files that explain the algorithm step by step. Open
 them directly in a browser. A good place to start:
 
 - `reduction/00_naive/naive_reduction_visualization_tree.html`
-- `reduction/01_shared/shared_reduction_visualization.html`
+- `reduction/03_sequential_addressing/shared_reduction_visualization.html`
 - `scan/00_kogge_stone/00_scan_kogge_stone_visualization.html`
 - `matmul/02_shared_memory/02_matmul_shared_memory_visualization.html`
-- `matrix_transpose/00_transpose_visualization.html`
+- `matrix_transpose/03_padded/03_transpose_bank_conflicts_visualization.html`
+
+The topic READMEs list the rest.
 
 ## 📄 License
 

@@ -1,0 +1,8 @@
+{
+  "name": "cuda-algorithm-lab-tools",
+  "private": true,
+  "description": "Checks for the HTML visualizations (no dependencies).",
+  "scripts": {
+    "check:viz": "node tools/check_visualizations.mjs"
+  }
+}

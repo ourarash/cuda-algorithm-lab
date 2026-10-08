@@ -25,13 +25,26 @@ jobs:
         run: cmake --build build
 
   visualizations:
+    # Every inline script must parse, external scripts may only come from an
+    # allowlist of CDNs (polyfill.io was taken over in 2024 and served
+    # malicious JavaScript), and local links must resolve.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Reject scripts from compromised hosts
-        # polyfill.io was taken over in 2024 and served malicious JavaScript.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the HTML visualizations
+        run: node tools/check_visualizations.mjs
+
+  tools:
+    # The benchmark and roofline scripts run on GPU machines; make sure they at
+    # least parse and show their help here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the Python tools
         run: |
-          if grep -rn --include='*.html' 'polyfill\.io' .; then
-            echo "Remove the polyfill.io script tags listed above."
-            exit 1
-          fi
+          python3 -m py_compile tools/bench.py tools/roofline.py docs/generate_pptx.py
+          python3 tools/bench.py --help > /dev/null
+          python3 tools/roofline.py --help > /dev/null

@@ -13,3 +13,10 @@
 
 # CMake build output
 /build/
+
+# Personal Codex tooling (kept locally, not part of the lab)
+/plugins/
+/.agents/
+
+# Python bytecode
+__pycache__/

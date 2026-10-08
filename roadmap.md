@@ -72,14 +72,13 @@ the polyfill.
 
 ## Phase 1: correctness and infrastructure
 
-Status: code changes are in. Every example type-checks against the CUDA 12.8
-headers (host and device code); the first `nvcc` build runs in CI, and the
-examples still need a first run on a GPU (`make test`, `make sanitize`).
+Status: done, except for the first run on a GPU. CI compiles every example
+with CUDA 12.8 and 13.3; the examples have not yet been executed on a GPU.
 
 - [x] Fix every build failure listed above.
 - [x] Fix every wrong-result bug listed above.
 - [x] Fix the padding explanation (code, README, visualization).
-- [ ] Move the misplaced visualization to `matmul/01_coalesced/`.
+- [x] Move the misplaced visualization to `matmul/01_coalesced/`.
 - [x] Rebuild the vectorized matmul stage on top of 2D register tiling so the
       ladder improves monotonically.
 - [x] Remove the `polyfill.io` script tags.
@@ -89,59 +88,64 @@ examples still need a first run on a GPU (`make test`, `make sanitize`).
       failure, and a `--quick` flag for small problem sizes.
 - [x] Switch the build to CMake with `ctest`; keep a thin root `Makefile` so
       `make`, `make test`, and `make sanitize` still work.
-- [ ] Delete the old per-folder Makefiles, which the CMake build replaces.
+- [x] Delete the old per-folder Makefiles, which the CMake build replaces.
 - [x] Run `compute-sanitizer` (memcheck and racecheck) through `ctest` labels.
 - [x] Credit Simon Boehm's article in `matmul/README.md`.
-- [ ] Delete `matmul_siboehm/` (a duplicate of `matmul/`) and the superseded
-      sparse files (`sparse/SpMV_CSR.cu`, `sparse/SpMV_EllPack.cu`,
-      `sparse/01_spgemm_cusparse/`, now `sparse/01_spmv_csr/`,
-      `sparse/02_spmv_ell/`, and `sparse/03_spgemm_cusparse/`).
+- [x] Delete `matmul_siboehm/` (a duplicate of `matmul/`) and the superseded
+      sparse files, now `sparse/01_spmv_csr/`, `sparse/02_spmv_ell/`, and
+      `sparse/03_spgemm_cusparse/`.
 - [x] Add a compile-only GitHub Actions workflow (hosted runners have no GPU).
 - [ ] Run `make test` and `make sanitize` on a GPU and fix anything they find.
 
 ## Phase 2: make the optimization story measurable
 
-- [ ] Rebuild the GEMM ladder so each step is faster than the last:
-  1. naive
-  2. coalesced
-  3. shared memory
-  4. 1D register tiling
-  5. 2D register tiling
-  6. vectorized loads + transposed A tile
-  7. warptiling
-  8. double buffering with `cp.async`
-  9. WMMA with shared-memory staging
-  10. `mma.sync` + `ldmatrix` + swizzled shared memory
-  11. Hopper TMA + WGMMA (`sm_90a`)
+Status: done, except for measurements, which need a GPU. Every new kernel was
+type-checked locally and compiled by nvcc in CI. Their indexing (including the
+`ldmatrix`/`mma.sync` fragment layouts, the swizzles, and the TMA/WGMMA shared
+memory layout) was checked against a thread-by-thread NumPy emulation, but no
+kernel has run on real hardware yet; every one validates itself when it does.
 
-  Optionally follow with Blackwell `tcgen05` or a CuTe version. Print cuBLAS as
-  the baseline on every run.
-- [ ] Full reduction ladder: the Harris steps (interleaved → sequential →
-      first add during load → unroll last warp → complete unroll →
-      grid-stride), then warp shuffle, cooperative groups, single-pass with
-      atomics or last-block, `float4` loads, and a CUB comparison.
-- [ ] Transpose ladder: copy baseline → naive → shared memory → padded →
-      swizzled, all in GB/s.
-- [ ] Per-topic README results tables: GPU, time, GFLOP/s or GB/s, % of
-      cuBLAS or % of peak, plus the one Nsight Compute metric that proves each
-      step's claim (for example
-      `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` for bank
-      conflicts, sectors per request for coalescing).
-- [ ] Roofline plot for the GEMM ladder.
+- [x] Rebuild the GEMM ladder (`matmul/00`-`11`), printing cuBLAS as the
+      baseline on every run:
+  1. naive (00) and coalesced (01)
+  2. shared memory (02)
+  3. 1D (03) and 2D (04) register tiling
+  4. vectorized loads + transposed A tile (05)
+  5. warptiling (06)
+  6. double buffering with `cp.async` (07)
+  7. WMMA, first without (08) and then with (09) shared-memory staging
+  8. `mma.sync` + `ldmatrix` + `cp.async` + swizzled shared memory (10)
+  9. Hopper TMA + WGMMA (`sm_90a`, 11)
+- [x] Full reduction ladder (`reduction/00`-`12`): the Harris steps
+      (interleaved divergent → interleaved with bank conflicts → sequential
+      → first add during load → unroll last warp → complete unroll →
+      grid-stride), then warp shuffle, cooperative groups, single-pass
+      (last block), `float4` loads, and CUB.
+- [x] Transpose ladder (`matrix_transpose/00`-`04`): copy baseline → naive →
+      shared memory → padded → swizzled, all in GB/s.
+- [x] Per-topic README tables naming the Nsight Compute metric that proves
+      each step's claim, and `make bench` (`tools/bench.py`) to generate the
+      results tables.
+- [ ] Fill the results tables with measurements from a real GPU.
+- [x] Roofline plot tool for the GEMM ladder (`make roofline`,
+      `tools/roofline.py`; measures DRAM traffic with Nsight Compute when
+      available).
+- [ ] Commit a roofline plot measured on a real GPU.
+- [ ] Optional: a Blackwell `tcgen05` GEMM, or a CuTe version.
+- [ ] Optional: a multi-stage, warp-specialized Hopper GEMM with clusters and
+      TMA multicast.
 
 ### Cleanup
 
-- [ ] Remove duplicate visualizations (two single-thread register-tiling views,
-      two naive-reduction views); keep the best of each.
-- [ ] Turn `test-viz.js` into a real visualization smoke test with a
-      `package.json`, or delete it.
-- [ ] Move `plugins/` and `.agents/` (personal Codex tooling) out of the public
-      tree.
-- [ ] Move `matmul/matmul_presentation.pptx` and `generate_pptx.py` to `docs/`
-      or a release asset.
-- [ ] Move `xor/`, the epsilon sorts, and ant colony optimization to
-      `applications/` or `libraries/thrust/`; they are library demos or niche
-      algorithms rather than CUDA fundamentals.
+- [x] Remove duplicate visualizations (kept the more complete single-thread
+      register-tiling view and the tree view of the naive reduction).
+- [x] Replace `test-viz.js` with `tools/check_visualizations.mjs` (run in CI
+      and by `make check-viz`).
+- [x] Move `plugins/` and `.agents/` (personal Codex tooling) out of the public
+      tree (untracked and ignored; they stay on disk).
+- [x] Move `matmul/matmul_presentation.pptx` and `generate_pptx.py` to `docs/`.
+- [x] Move the Thrust set-operations example to `libraries/`, and ant colony
+      optimization and the epsilon sorts to `applications/`.
 
 ## Phase 3: new content
 

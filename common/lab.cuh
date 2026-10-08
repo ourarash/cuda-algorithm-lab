@@ -258,4 +258,30 @@ inline int finish(bool pass) {
   return pass ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// ---------------------------------------------------------------------------
+// Hardware requirements
+// ---------------------------------------------------------------------------
+
+// Exit code for "this GPU cannot run this example", for example a Hopper-only
+// kernel on an Ampere GPU. ctest reports it as skipped instead of failed.
+constexpr int kSkipExitCode = 77;
+
+// Compute capability of the current device as one number: 8.6 -> 86.
+inline int compute_capability() {
+  int device = 0;
+  int major = 0;
+  int minor = 0;
+  CUDA_CHECK(cudaGetDevice(&device));
+  CUDA_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
+                                    device));
+  CUDA_CHECK(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor,
+                                    device));
+  return major * 10 + minor;
+}
+
+inline int skip(const char* reason) {
+  std::printf("SKIP: %s\n", reason);
+  return kSkipExitCode;
+}
+
 }  // namespace lab
