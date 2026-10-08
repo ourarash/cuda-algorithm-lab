@@ -61,3 +61,33 @@ different part of the implementation.
 - Finishes the multi-block story entirely on the GPU.
 - Recursively scans the array of block sums, then adds scanned block offsets
   back into each block output.
+
+### 7. `07_warp_shuffle_reduce_then_scan/07_scan_warp_shuffle.cu`
+
+**Warp Shuffles, Reduce-Then-Scan**
+
+- Integer scan with the modern building blocks: each thread scans 4 elements
+  in registers (one 16-byte load), warps scan with `__shfl_up_sync`, and
+  warp totals are combined through shared memory.
+- Any array size takes exactly three launches: tile totals, a single-block
+  scan of the totals, and a final scan of each tile with its offset. The input
+  is read twice.
+
+### 8. `08_decoupled_lookback/08_scan_decoupled_lookback.cu`
+
+**Single-Pass Scan with Decoupled Look-Back**
+
+- The algorithm inside CUB (Merrill and Garland): each tile publishes its
+  total, then looks back at its predecessors' published values to find its
+  prefix, so the input is read once.
+- Tiles are numbered by an atomic counter in the order blocks start, which
+  guarantees that the spin-wait on an earlier tile cannot deadlock.
+
+### 9. `09_cub/09_scan_cub.cu`
+
+**CUB DeviceScan (the baseline)**
+
+- `cub::DeviceScan::InclusiveSum`, the tuned version of step 08.
+
+Steps 07-09 share [scan_harness.cuh](scan_harness.cuh): exact validation on
+integers and GB/s against the minimum traffic (read once, write once).

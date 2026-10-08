@@ -6,7 +6,8 @@
  * many small sorted runs, then repeatedly merge those runs in parallel.
  *
  * High-Level Algorithm:
- * - Sort block-local chunks in shared memory to create initial sorted runs.
+ * - Sort block-local chunks in shared memory with a bitonic network to
+ *   create initial sorted runs.
  * - Use a co-rank based merge kernel so each thread merges a small independent
  *   slice of two sorted runs.
  * - Ping-pong between two device buffers until the entire array is sorted.
@@ -114,19 +115,21 @@ __global__ void mergeKernel(float *A, float *B, float *C, unsigned int m,
 // Initial Sort Kernel
 // ===================================================================================
 // This kernel performs the first pass of the sort. Each block loads a chunk of
-// the input data into shared memory, sorts it locally, and writes it back.
-// This creates the initial small, sorted runs that the merge kernel will work
-// on.
+// ELEMENTS_PER_BLOCK values into shared memory, sorts it with a bitonic
+// sorting network (see sort/02_bitonic_sort), and writes it back. This creates
+// the initial sorted runs that the merge kernel works on.
+//
+// All 256 threads take part: each of the network's steps compares 512 pairs,
+// two per thread. (An earlier version let one thread insertion-sort the whole
+// chunk while the other 255 waited.) A partial last chunk is padded with
+// +infinity, which sorts to the end and is not written back.
 
-__device__ void insertionSort(float *data, int size) {
-  for (int i = 1; i < size; i++) {
-    float key = data[i];
-    int j = i - 1;
-    while (j >= 0 && data[j] > key) {
-      data[j + 1] = data[j];
-      j = j - 1;
-    }
-    data[j + 1] = key;
+__device__ __forceinline__ void compareExchange(float &a, float &b,
+                                                bool ascending) {
+  if ((a > b) == ascending) {
+    const float t = a;
+    a = b;
+    b = t;
   }
 }
 
@@ -134,36 +137,33 @@ __global__ void initialSortKernel(float *data, unsigned int N) {
   __shared__ float shared_data[ELEMENTS_PER_BLOCK];
 
   unsigned int block_start_idx = blockIdx.x * ELEMENTS_PER_BLOCK;
-  unsigned int thread_local_idx = threadIdx.x;
 
-  // Each thread in the block loads multiple elements into shared memory
+  // Each thread loads ELEMENTS_PER_THREAD values; missing ones become +inf.
   for (int i = 0; i < ELEMENTS_PER_THREAD; ++i) {
-    unsigned int global_idx =
-        block_start_idx + thread_local_idx + i * blockDim.x;
-    unsigned int shared_idx = thread_local_idx + i * blockDim.x;
-    if (global_idx < N) {
-      shared_data[shared_idx] = data[global_idx];
+    unsigned int shared_idx = threadIdx.x + i * blockDim.x;
+    unsigned int global_idx = block_start_idx + shared_idx;
+    shared_data[shared_idx] = global_idx < N ? data[global_idx] : INFINITY;
+  }
+  __syncthreads();
+
+  // Bitonic network over the chunk. Pair p at a given stride compares
+  // elements low and low + stride, where low inserts a 0 at bit `stride`.
+  for (unsigned int size = 2; size <= ELEMENTS_PER_BLOCK; size *= 2) {
+    for (unsigned int stride = size / 2; stride > 0; stride /= 2) {
+      for (unsigned int p = threadIdx.x; p < ELEMENTS_PER_BLOCK / 2;
+           p += blockDim.x) {
+        const unsigned int low = 2 * stride * (p / stride) + (p % stride);
+        compareExchange(shared_data[low], shared_data[low + stride],
+                        (low & size) == 0);
+      }
+      __syncthreads();
     }
   }
 
-  __syncthreads();
-
-  // Sort the data within the block using a single thread for simplicity.
-  // NOTE: A parallel sort (e.g., bitonic sort) in shared memory would be more
-  // efficient.
-  if (threadIdx.x == 0) {
-    unsigned int effective_size =
-        min((unsigned int)ELEMENTS_PER_BLOCK, N - block_start_idx);
-    insertionSort(shared_data, effective_size);
-  }
-
-  __syncthreads();
-
   // Write the sorted chunk from shared memory back to global memory
   for (int i = 0; i < ELEMENTS_PER_THREAD; ++i) {
-    unsigned int global_idx =
-        block_start_idx + thread_local_idx + i * blockDim.x;
-    unsigned int shared_idx = thread_local_idx + i * blockDim.x;
+    unsigned int shared_idx = threadIdx.x + i * blockDim.x;
+    unsigned int global_idx = block_start_idx + shared_idx;
     if (global_idx < N) {
       data[global_idx] = shared_data[shared_idx];
     }

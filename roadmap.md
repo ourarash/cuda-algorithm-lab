@@ -149,23 +149,47 @@ kernel has run on real hardware yet; every one validates itself when it does.
 
 ## Phase 3: new content
 
-- [ ] Scan: warp-shuffle scan, single-pass decoupled look-back (the CUB
-      algorithm), CUB comparison.
-- [ ] Core patterns: histogram (privatization, aggregation), stream
-      compaction, radix sort built from the repo's own scan and histogram,
-      bitonic sort (also replacing the single-thread insertion sort in merge
-      sort), stencil and convolution (constant memory, halo tiles).
-- [ ] Modern ML kernels: online softmax, LayerNorm/RMSNorm, a minimal
-      FlashAttention forward pass, and a PyTorch C++/CUDA extension wrapping
-      one of them.
-- [ ] Memory and concurrency: pinned vs. pageable bandwidth, streams with
-      copy/compute overlap, CUDA Graphs, unified memory with prefetch and
-      advise.
-- [ ] Debugging chapter: intentionally buggy kernels (race, out-of-bounds,
-      missing sync, divergent `__syncthreads`) to diagnose with
-      `compute-sanitizer`.
-- [ ] Sparse: CSR scalar vs. CSR vector (warp per row), ELL, hybrid, cuSPARSE
-      SpMV, and a Matrix Market loader so realistic matrices expose load
-      imbalance.
-- [ ] Basics: occupancy and `__launch_bounds__`, a warp-divergence demo,
-      cooperative groups.
+Status: done, except for running the new examples on a GPU (the same open
+item as Phases 1 and 2). Each new kernel was type-checked locally and
+compiled by nvcc in CI; the trickier logic (decoupled look-back under random
+block schedules, radix sort stability, bitonic networks, FlashAttention
+tiling, halo loads, and the float tolerances of the ML kernels) was checked
+with NumPy emulations.
+
+- [x] Scan (`scan/07`-`09`): warp-shuffle reduce-then-scan, single-pass
+      decoupled look-back, CUB comparison.
+- [x] Core patterns:
+  - [x] histogram (`histogram/`): global atomics, shared-memory
+        privatization, aggregation with vector loads, CUB;
+  - [x] stream compaction (`compaction/`): scan-based (stable),
+        warp-aggregated atomics (unstable), CUB;
+  - [x] radix sort built from the repo's own histogram and scan
+        (`sort/03`), with CUB as the baseline (`sort/04`);
+  - [x] bitonic sort (`sort/02`), also replacing the single-thread insertion
+        sort in merge sort;
+  - [x] convolution (`convolution/`: constant memory, halo tiles) and a 3D
+        stencil (`stencil/`: register streaming along z).
+- [x] Modern ML kernels (`ml/`): three-pass and online softmax, LayerNorm
+      (Welford), RMSNorm, naive attention, a minimal FlashAttention forward
+      pass, and a PyTorch C++/CUDA extension wrapping RMSNorm and softmax.
+- [x] Memory and concurrency (`memory/01`-`04`): pinned vs. pageable
+      bandwidth, streams with copy/compute overlap, CUDA Graphs, unified
+      memory with prefetch.
+- [x] Debugging chapter (`debugging/`): out-of-bounds (memcheck), shared
+      memory race (racecheck), uninitialized memory (initcheck), wrong
+      `__syncwarp` mask (synccheck), each wired into ctest as a test that the
+      sanitizer catches the bug.
+- [x] Sparse (`sparse/04`-`07`): CSR scalar vs. CSR vector on power-law
+      matrices, hybrid ELL + COO, cuSPARSE SpMV, and a Matrix Market loader
+      (`--mtx`).
+- [x] Basics (`basics/04`-`06`): occupancy and `__launch_bounds__`, a
+      warp-divergence demo, cooperative groups with grid-wide sync.
+- [ ] Build and run the PyTorch extension test with PyTorch on a GPU (CI has
+      no PyTorch, so it only checks that the test script parses).
+
+## Ideas beyond the roadmap
+
+- Causal masking, a backward pass, and Tensor Cores for FlashAttention.
+- A warp-parallel look-back for the decoupled look-back scan, and 8-bit
+  digits with shared-memory local sorting for the radix sort.
+- Multi-GPU examples: peer-to-peer copies and NCCL all-reduce.

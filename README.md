@@ -26,7 +26,14 @@ visualizations to make the algorithm flow easier to follow.
     and CUB
   - [matrix_transpose/](matrix_transpose/): copy baseline, naive, shared
     memory, padding, and swizzling
-- Topics like scan, sorting, sparse matrices, and warp-level programming
+- Modern ML kernels in [ml/](ml/): softmax (three-pass and online),
+  LayerNorm, RMSNorm, naive attention vs. FlashAttention, and a PyTorch
+  extension
+- Parallel building blocks: scan (up to single-pass decoupled look-back),
+  histogram, stream compaction, and a radix sort built from them
+- Convolution and stencils with halo tiles, memory and concurrency (pinned
+  memory, streams, CUDA Graphs, unified memory), sparse formats on irregular
+  matrices, and a debugging chapter built around compute-sanitizer
 - Interactive visualizations for selected algorithms
 - Short, readable CUDA files with top-of-file intent and algorithm summaries
 - Every example checks its own result and reports a meaningful performance
@@ -34,17 +41,28 @@ visualizations to make the algorithm flow easier to follow.
 
 ## 🗂️ Repo Layout
 
-- `basics/`: CUDA basics, thread hierarchy, vector add, runtime API examples
-- `memory/`: memory-management focused examples
+- `basics/`: thread hierarchy, vector add, device query, occupancy and
+  `__launch_bounds__`, warp divergence, cooperative groups
+- `memory/`: pinned memory, streams, CUDA Graphs, unified memory
+  ([README](memory/README.md))
 - `warp/`: warp shuffle and warp-level programming examples
 - `reduction/`: the reduction ladder ([README](reduction/README.md))
-- `scan/`: inclusive and exclusive scan algorithms, from simple to multi-block
-  ([README](scan/README.md))
+- `scan/`: prefix sums, from single-block textbook scans to single-pass
+  decoupled look-back ([README](scan/README.md))
+- `histogram/`: atomics, privatization, aggregation ([README](histogram/README.md))
+- `compaction/`: stream compaction, stable and unstable ([README](compaction/README.md))
 - `matmul/`: the GEMM ladder ([README](matmul/README.md))
 - `matrix_transpose/`: the transpose ladder ([README](matrix_transpose/README.md))
-- `sort/`: counting sort and merge sort
-- `sparse/`: sparse matrix-vector (COO, CSR, ELL) and cuSPARSE sparse
-  matrix-matrix examples
+- `sort/`: counting, merge, bitonic, and radix sort ([README](sort/README.md))
+- `convolution/` and `stencil/`: 2D convolution and a 3D stencil with halo
+  tiles ([README](convolution/README.md), [README](stencil/README.md))
+- `ml/`: softmax, LayerNorm, RMSNorm, attention, FlashAttention, and a
+  PyTorch extension ([README](ml/README.md))
+- `debugging/`: deliberate bugs to find with compute-sanitizer
+  ([README](debugging/README.md))
+- `sparse/`: COO, CSR (scalar and vector), ELL, hybrid, and cuSPARSE, on
+  uniform and power-law matrices, plus Matrix Market loading
+  ([README](sparse/README.md))
 - `libraries/`: cuBLAS GEMM and a Thrust set-operations example
 - `applications/`: larger examples (ant colony optimization for the TSP,
   approximate "epsilon" sorting)
@@ -96,7 +114,7 @@ Test, measure, and sanitize everything:
 ```bash
 make test       # run every example at full size; each must PASS
 make sanitize   # run every example under compute-sanitizer memcheck and racecheck
-make bench      # results tables for the matmul, reduction, and transpose ladders
+make bench      # results tables for every topic that reports performance
 make roofline   # roofline plot of the GEMM ladder (matplotlib; uses ncu if installed)
 make check-viz  # smoke-test the HTML visualizations (Node.js)
 make clean      # delete build/
@@ -120,13 +138,16 @@ nvcc -O3 -I common basics/02_vector_add/02_vector_add.cu -o vector_add
 
 If you're using this repo to learn, a good order is:
 
-1. `basics/`
+1. `basics/` and `memory/`
 2. `reduction/`
 3. `matrix_transpose/`
-4. `scan/`
-5. `matmul/`
-6. `warp/`
-7. `sparse/`
+4. `scan/`, then `histogram/` and `compaction/`
+5. `sort/` (radix sort ties the previous three together)
+6. `convolution/` and `stencil/`
+7. `matmul/`
+8. `ml/`
+9. `sparse/`
+10. `debugging/`, any time something goes wrong
 
 ## 🌐 Visualizations
 

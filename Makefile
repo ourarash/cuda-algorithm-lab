@@ -5,8 +5,9 @@
 #   make test             run every example at full size; each must PASS
 #                         (examples this GPU cannot run are reported as skipped)
 #   make sanitize         run every example under compute-sanitizer
-#                         (memcheck + racecheck) at --quick sizes
-#   make bench            results tables for matmul, reduction, matrix_transpose
+#                         (memcheck + racecheck) at --quick sizes, and check
+#                         that the debugging/ examples' bugs are detected
+#   make bench            results tables for every topic that reports performance
 #   make roofline         roofline plot of the GEMM ladder (needs matplotlib;
 #                         uses Nsight Compute if available)
 #   make check-viz        smoke-test the HTML visualizations (needs Node.js)
@@ -30,7 +31,7 @@ test: all
 	ctest --test-dir $(BUILD_DIR) -L '^run$$' --output-on-failure
 
 sanitize: all
-	ctest --test-dir $(BUILD_DIR) -L 'memcheck|racecheck' --output-on-failure
+	ctest --test-dir $(BUILD_DIR) -L 'memcheck|racecheck|initcheck|synccheck' --output-on-failure
 
 bench: all
 	$(PYTHON) tools/bench.py --build $(BUILD_DIR)

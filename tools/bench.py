@@ -13,7 +13,7 @@ This script runs each binary under build/bin/<topic>/, parses those lines, and
 writes one table per topic, ready to paste into the topic's README.
 
 Usage:
-    python3 tools/bench.py                      # matmul, reduction, matrix_transpose
+    python3 tools/bench.py                      # every topic that reports performance
     python3 tools/bench.py --topics scan sort   # any topics
     python3 tools/bench.py --out results.md     # also write the tables to a file
     python3 tools/bench.py --quick              # small sizes, for a smoke test
@@ -60,9 +60,14 @@ def run_topic(binaries, quick):
         gpu = gpu or g
         if verdict == "?":
             verdict = "SKIP" if proc.returncode == 77 else ("PASS" if proc.returncode == 0 else "FAIL")
-        # The first performance line is the example itself; others are baselines.
-        main = rows[0] if rows else {"label": binary.name}
-        table.append({"name": binary.name, "verdict": verdict, "vs_cublas": vs_cublas, **main})
+        # One table row per measurement the example prints (histograms time two
+        # inputs, memory examples several variants). The cuBLAS line in matmul
+        # is a baseline, reported as "% of cuBLAS" instead of its own row.
+        measured = [r for r in rows if not r["label"].startswith("cuBLAS")]
+        for i, row in enumerate(measured or [{"label": binary.name}]):
+            name = binary.name if len(measured) <= 1 else f"{binary.name}: {row['label']}"
+            table.append({"name": name, "verdict": verdict,
+                          "vs_cublas": vs_cublas if i == 0 else None, **row})
     return gpu, table
 
 
@@ -97,7 +102,9 @@ def markdown(topic, gpu, table):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build", default="build", help="CMake build directory (default: build)")
-    parser.add_argument("--topics", nargs="+", default=["matmul", "reduction", "matrix_transpose"])
+    parser.add_argument("--topics", nargs="+", default=[
+        "matmul", "reduction", "matrix_transpose", "scan", "histogram", "compaction",
+        "sort", "convolution", "stencil", "ml", "sparse", "memory"])
     parser.add_argument("--out", help="also write the Markdown to this file")
     parser.add_argument("--quick", action="store_true", help="pass --quick to every example")
     args = parser.parse_args()
