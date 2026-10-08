@@ -22,7 +22,11 @@ What it does:
 
 Usage:
     python3 tools/roofline.py [--build build] [--out docs/roofline.png]
-                              [--tensor-tflops 989]
+                              [--size 4096] [--tensor-tflops 989]
+
+Use --size large enough that A, B, and C do not fit in L2 (4096 or more on
+GPUs with 40-50 MB of L2, such as A100 and H100); otherwise every kernel
+reads DRAM only once and they all land at the same intensity.
 Requires matplotlib (pip install matplotlib).
 """
 import argparse
@@ -79,13 +83,14 @@ def problem_size(output):
     return tuple(int(v) for v in m.groups()) if m else (1024, 1024, 1024)
 
 
-def ncu_dram_bytes(binary):
+def ncu_dram_bytes(binary, extra_args):
     """DRAM bytes moved by one launch of the stage's own kernel, or None."""
     if not shutil.which("ncu"):
         return None
     cmd = ["ncu", "--csv", "--print-units", "base", "--launch-count", "1",
            "--kernel-name", "regex:^[sh]gemm_",
-           "--metrics", "dram__bytes_read.sum,dram__bytes_write.sum", str(binary)]
+           "--metrics", "dram__bytes_read.sum,dram__bytes_write.sum",
+           str(binary)] + extra_args
     proc = subprocess.run(cmd, capture_output=True, text=True)
     lines = proc.stdout.splitlines()
     start = next((i for i, l in enumerate(lines) if l.startswith('"ID"')), None)
@@ -98,11 +103,11 @@ def ncu_dram_bytes(binary):
     return total or None
 
 
-def measure(build):
+def measure(build, extra_args):
     points = []
     for binary in sorted((Path(build) / "bin" / "matmul").glob("*")):
         print(f"running {binary.name} ...", file=sys.stderr)
-        proc = subprocess.run([str(binary)], capture_output=True, text=True)
+        proc = subprocess.run([str(binary)] + extra_args, capture_output=True, text=True)
         _, rows, verdict, _ = bench.parse(proc.stdout)
         if verdict != "PASS" or not rows or "gflops" not in rows[0]:
             print(f"  skipped ({verdict})", file=sys.stderr)
@@ -112,7 +117,7 @@ def measure(build):
         tensor = any(t in binary.name for t in ("wmma", "mma_sync", "wgmma"))
         in_bytes = 2 if tensor else 4
         min_bytes = in_bytes * (m * k + k * n) + 4 * 2 * m * n
-        dram = ncu_dram_bytes(binary)
+        dram = ncu_dram_bytes(binary, extra_args)
         points.append({
             "step": binary.name.split("_")[0],
             "name": binary.name,
@@ -122,6 +127,29 @@ def measure(build):
             "tensor": tensor,
         })
     return points
+
+
+def label_points(ax, points, dpi):
+    """Labels each point with its step number, choosing among four positions
+    around the marker the one farthest from every other marker and every label
+    already placed, so clustered points stay readable."""
+    import numpy as np
+    to_px = ax.transData.transform
+    markers = [to_px((p["intensity"], p["gflops"])) for p in points]
+    scale = dpi / 72.0  # Offsets are in points; transforms are in pixels.
+    candidates = [(7, 5), (7, -13), (-7, 5), (-7, -13)]
+    placed = []
+    for i, p in enumerate(sorted(points, key=lambda q: q["intensity"])):
+        here = to_px((p["intensity"], p["gflops"]))
+        others = [m for m in markers if not np.allclose(m, here)] + placed
+        def clearance(offset):
+            center = here + np.array([offset[0] + (6 if offset[0] > 0 else -6), offset[1] + 4]) * scale
+            return min((np.hypot(*(center - o)) for o in others), default=1e9)
+        best = max(candidates, key=clearance)
+        placed.append(here + np.array([best[0] + (6 if best[0] > 0 else -6), best[1] + 4]) * scale)
+        ax.annotate(p["step"], (p["intensity"], p["gflops"]), xytext=best,
+                    textcoords="offset points", ha="left" if best[0] > 0 else "right",
+                    color=TEXT_PRIMARY, fontsize=9, zorder=4)
 
 
 def plot(points, dev, out, tensor_tflops):
@@ -164,14 +192,11 @@ def plot(points, dev, out, tensor_tflops):
         ax.scatter([p["intensity"] for p in group], [p["gflops"] for p in group],
                    s=70, color=color, marker=marker, edgecolors=SURFACE, linewidths=2,
                    label=label, zorder=3)
-        # Alternate labels above and below the marks so neighbors don't collide.
-        for i, p in enumerate(sorted(group, key=lambda q: q["intensity"])):
-            ax.annotate(p["step"], (p["intensity"], p["gflops"]),
-                        xytext=(6, 5) if i % 2 == 0 else (6, -13),
-                        textcoords="offset points", color=TEXT_PRIMARY, fontsize=9)
+
+    ax.set_xlim(x_lo, x_hi)
+    label_points(ax, points, fig.dpi)
 
     measured = all(p["measured"] for p in points) and points
-    ax.set_xlim(x_lo, x_hi)
     ax.set_xlabel("Arithmetic intensity (FLOP per byte of DRAM traffic"
                   + (", measured with ncu)" if measured else ", minimum traffic)"),
                   color=TEXT_PRIMARY)
@@ -191,6 +216,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build", default="build")
     parser.add_argument("--out", default="docs/roofline.png")
+    parser.add_argument("--size", type=int, default=None,
+                        help="run every GEMM as size x size x size (default: each binary's default)")
     parser.add_argument("--tensor-tflops", type=float, default=None,
                         help="dense FP16 Tensor Core peak of this GPU, to draw its roof")
     args = parser.parse_args()
@@ -199,7 +226,8 @@ def main():
     except ImportError:
         sys.exit("matplotlib is required: pip install matplotlib")
     dev = device_info(args.build)
-    points = measure(args.build)
+    extra_args = ["--m", str(args.size), "--n", str(args.size), "--k", str(args.size)] if args.size else []
+    points = measure(args.build, extra_args)
     # Also print the data as a table, so the plot is never the only view.
     print("| Step | GFLOP/s | FLOP/byte | Traffic |")
     print("|---|---|---|---|")
