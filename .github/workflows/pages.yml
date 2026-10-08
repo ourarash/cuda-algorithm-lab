@@ -1,0 +1,41 @@
+name: pages
+
+# Publishes the HTML visualizations to GitHub Pages so they open in a browser
+# without cloning. Each visualization keeps its repo path, and
+# docs/site/index.html becomes the site root.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.html"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble site
+        run: |
+          mkdir _site
+          find . -name '*.html' -not -path './docs/*' -not -path './build/*' \
+            -not -path './_site/*' -exec cp --parents {} _site/ \;
+          cp docs/site/index.html _site/index.html
+          find _site -type f | sort
+      - uses: actions/upload-pages-artifact@v3
+      - id: deployment
+        uses: actions/deploy-pages@v4

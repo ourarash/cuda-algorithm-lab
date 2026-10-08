@@ -6,6 +6,8 @@
 [![CMake 3.24+](https://img.shields.io/badge/CMake-3.24%2B-064F8C?logo=cmake&logoColor=white)](CMakeLists.txt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![CUDA Algorithm Lab: optimization ladders from a naive kernel to Tensor Cores](docs/banner.png)
+
 Lightweight CUDA examples for learning how GPU algorithms evolve from simple
 versions to better ones.
 
@@ -151,8 +153,9 @@ If you're using this repo to learn, a good order is:
 
 ## 🌐 Visualizations
 
-Some folders include HTML files that explain the algorithm step by step. Open
-them directly in a browser. A good place to start:
+Some folders include HTML files that explain the algorithm step by step.
+[Browse them online](https://ourarash.github.io/cuda-algorithm-lab/), or open
+them directly in a browser from a clone. A good place to start:
 
 - `reduction/00_naive/naive_reduction_visualization_tree.html`
 - `reduction/03_sequential_addressing/shared_reduction_visualization.html`

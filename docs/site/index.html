@@ -1,0 +1,102 @@
+<!doctype html>
+<!--
+  Landing page for the GitHub Pages site. The pages workflow
+  (.github/workflows/pages.yml) copies every visualization into the site at its
+  repo path and serves this file as the site root, so links here are relative
+  to the repo root, not to docs/site/. Add new visualizations to the list below.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUDA Algorithm Lab</title>
+<meta name="description" content="Interactive visualizations of CUDA algorithms: matrix multiplication, reduction, scan, and transpose.">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --card: #f6f8fa;
+    --border: #d1d9e0;
+    --accent: #3f7d00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --card: #151b23;
+      --border: #3d444d;
+      --accent: #76b900;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 2rem; margin: 0 0 8px; }
+  h2 { font-size: 1.15rem; margin: 40px 0 12px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; max-width: 640px; }
+  a { color: var(--accent); }
+  ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  li a {
+    display: block;
+    padding: 12px 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--fg);
+    text-decoration: none;
+  }
+  li a:hover { border-color: var(--accent); }
+  li span { display: block; color: var(--muted); font-size: 0.9rem; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>CUDA Algorithm Lab</h1>
+  <p class="lead">
+    Interactive, step-by-step visualizations of how GPU algorithms map threads
+    to data. Each one goes with a runnable, self-checking CUDA example in the
+    <a href="https://github.com/ourarash/cuda-algorithm-lab">repository</a>.
+  </p>
+
+  <h2>Matrix multiplication (GEMM)</h2>
+  <ul>
+    <li><a href="matmul/00_uncoalesced/naive_visualization.html">Naive kernel memory patterns<span>Step 00: one thread per output, uncoalesced loads</span></a></li>
+    <li><a href="matmul/01_coalesced/01_thread_to_memory_mapping_visualization.html">Thread-to-memory mapping<span>Step 01: how a warp's addresses become coalesced</span></a></li>
+    <li><a href="matmul/02_shared_memory/02_matmul_shared_memory_visualization.html">Shared memory tiling<span>Step 02: staging tiles of A and B in shared memory</span></a></li>
+    <li><a href="matmul/03_1d_register_tiling/03_matmul_register_tiling_visualization.html">1D register tiling<span>Step 03: each thread computes a column of outputs</span></a></li>
+    <li><a href="matmul/03_1d_register_tiling/03_matmul_register_tiling_visualization_single_thread.html">Register tiling for a single thread<span>Step 03: one thread's loads and FMAs, up close</span></a></li>
+    <li><a href="matmul/03_1d_register_tiling/outer-product.html">Matrix multiplication modes<span>Inner product versus outer product formulations</span></a></li>
+    <li><a href="matmul/04_2d_register_tiling/04_matmul_2d_register_tiling_visualization.html">2D register tiling<span>Step 04: each thread computes an 8 x 8 patch</span></a></li>
+  </ul>
+
+  <h2>Reduction</h2>
+  <ul>
+    <li><a href="reduction/00_naive/naive_reduction_visualization_tree.html">Naive reduction tree<span>Interleaved addressing and its divergent warps</span></a></li>
+    <li><a href="reduction/03_sequential_addressing/shared_reduction_visualization.html">Shared memory reduction<span>Sequential addressing without bank conflicts</span></a></li>
+  </ul>
+
+  <h2>Scan</h2>
+  <ul>
+    <li><a href="scan/00_kogge_stone/00_scan_kogge_stone_visualization.html">Kogge-Stone scan<span>An inclusive prefix sum in log2(n) steps</span></a></li>
+  </ul>
+
+  <h2>Matrix transpose</h2>
+  <ul>
+    <li><a href="matrix_transpose/03_padded/03_transpose_bank_conflicts_visualization.html">Shared memory bank conflicts<span>Why one column of padding removes them</span></a></li>
+  </ul>
+
+  <footer>
+    MIT licensed. Source, benchmarks, and the full optimization ladders are on
+    <a href="https://github.com/ourarash/cuda-algorithm-lab">GitHub</a>.
+  </footer>
+</main>
+</body>
+</html>

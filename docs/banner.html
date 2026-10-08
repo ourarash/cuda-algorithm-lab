@@ -1,0 +1,125 @@
+<!doctype html>
+<!--
+  Source for docs/banner.png, the README banner and GitHub social preview
+  (1280 x 640). The staircase is illustrative: it shows the order of the GEMM
+  steps, not measured speeds. Regenerate with:
+
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless \
+      --disable-gpu --hide-scrollbars --window-size=1280,640 \
+      --screenshot=docs/banner.png docs/banner.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CUDA Algorithm Lab banner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+  body {
+    background: #0d1117;
+    background-image:
+      linear-gradient(rgba(118, 185, 0, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(118, 185, 0, 0.05) 1px, transparent 1px);
+    background-size: 32px 32px;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    display: flex;
+    padding: 72px 72px 64px;
+    gap: 48px;
+  }
+  .text { width: 470px; display: flex; flex-direction: column; }
+  .kicker {
+    color: #76b900;
+    font: 600 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  h1 { font-size: 64px; line-height: 1.05; margin-top: 20px; letter-spacing: -0.02em; }
+  p { color: #9198a1; font-size: 23px; line-height: 1.4; margin-top: 24px; }
+  .chips { margin-top: auto; display: flex; flex-wrap: wrap; gap: 10px; }
+  .chips span {
+    font: 500 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #c9d1d9;
+    border: 1px solid #3d444d;
+    border-radius: 999px;
+    padding: 9px 14px;
+  }
+  .ladder { flex: 1; display: flex; flex-direction: column; }
+  .ladder h2 {
+    font: 600 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9198a1;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .steps { flex: 1; display: flex; align-items: flex-end; gap: 8px; margin-top: 24px; }
+  .step {
+    flex: 1;
+    border-radius: 6px 6px 2px 2px;
+    background: #2b3a1a;
+    border: 1px solid #4a6b1f;
+    position: relative;
+  }
+  .step.tc { background: #76b900; border-color: #9be22b; }
+  .step b {
+    position: absolute;
+    top: 8px; left: 0; right: 0;
+    text-align: center;
+    font: 700 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #b6d77a;
+  }
+  .step.tc b { color: #0d1117; }
+  .names {
+    display: flex; gap: 8px; margin-top: 12px;
+    font: 500 12px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9198a1;
+  }
+  .names span { flex: 1; text-align: center; }
+  .legend {
+    display: flex; gap: 24px; margin-top: 20px;
+    font-size: 16px; color: #9198a1;
+  }
+  .legend i {
+    display: inline-block; width: 14px; height: 14px; border-radius: 3px;
+    vertical-align: -2px; margin-right: 8px;
+  }
+</style>
+</head>
+<body>
+  <div class="text">
+    <div class="kicker">Open-source CUDA course</div>
+    <h1>CUDA Algorithm Lab</h1>
+    <p>Optimization ladders where each step changes one idea, from a naive
+      kernel up to Tensor Cores, each one benchmarked against cuBLAS.</p>
+    <div class="chips">
+      <span>GEMM</span><span>reduction</span><span>scan</span><span>sort</span>
+      <span>FlashAttention</span><span>sparse</span><span>stencil</span>
+    </div>
+  </div>
+  <div class="ladder">
+    <h2>The GEMM ladder, 12 steps</h2>
+    <div class="steps">
+      <div class="step" style="height:12%"><b>00</b></div>
+      <div class="step" style="height:19%"><b>01</b></div>
+      <div class="step" style="height:26%"><b>02</b></div>
+      <div class="step" style="height:33%"><b>03</b></div>
+      <div class="step" style="height:40%"><b>04</b></div>
+      <div class="step" style="height:47%"><b>05</b></div>
+      <div class="step" style="height:54%"><b>06</b></div>
+      <div class="step" style="height:61%"><b>07</b></div>
+      <div class="step tc" style="height:70%"><b>08</b></div>
+      <div class="step tc" style="height:79%"><b>09</b></div>
+      <div class="step tc" style="height:89%"><b>10</b></div>
+      <div class="step tc" style="height:100%"><b>11</b></div>
+    </div>
+    <div class="names">
+      <span>naive</span><span>coal&shy;esce</span><span>smem</span><span>1D reg</span>
+      <span>2D reg</span><span>float4</span><span>warp tile</span><span>cp. async</span>
+      <span>WMMA</span><span>WMMA smem</span><span>mma. sync</span><span>WG&shy;MMA</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#2b3a1a;border:1px solid #4a6b1f"></i>FP32 CUDA cores</span>
+      <span><i style="background:#76b900"></i>FP16 Tensor Cores</span>
+    </div>
+  </div>
+</body>
+</html>

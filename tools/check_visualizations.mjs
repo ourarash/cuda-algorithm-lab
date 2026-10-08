@@ -57,16 +57,22 @@ for (const file of files) {
     }
   }
 
-  // External and local references in src= and href=.
-  const refRe = /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+  // External and local references in src= and href=. The allowlist only
+  // applies to what the page loads, not to plain <a> links. Pages under
+  // docs/site/ are served from the site root (see .github/workflows/pages.yml),
+  // so their local links resolve against the repo root.
+  const base = name.startsWith(join("docs", "site")) ? root : dirname(file);
+  const refRe = /<(\w+)\b[^>]*?\b(?:src|href)\s*=\s*["']([^"']+)["']/gi;
   while ((match = refRe.exec(html)) !== null) {
-    const ref = match[1];
+    const [, tag, ref] = match;
     if (ref.startsWith("#") || ref.startsWith("data:") || ref.startsWith("mailto:")) continue;
     if (/^https?:\/\//i.test(ref)) {
       const host = new URL(ref).hostname;
-      if (!allowedHosts.has(host)) problems.push(`${name}: loads from non-allowlisted host ${host} (${ref})`);
+      if (tag.toLowerCase() !== "a" && !allowedHosts.has(host)) {
+        problems.push(`${name}: loads from non-allowlisted host ${host} (${ref})`);
+      }
     } else if (!ref.includes("${")) {
-      const target = join(dirname(file), ref.split(/[?#]/)[0]);
+      const target = join(base, ref.split(/[?#]/)[0]);
       if (!existsSync(target)) problems.push(`${name}: local reference not found: ${ref}`);
     }
   }
