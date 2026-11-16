@@ -1,0 +1,110 @@
+name: GPU Simulator
+
+# Optional, non-required check. The hosted runners have no GPU, so this builds
+# the examples and runs them (--quick sizes) on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim). A simulator cannot reproduce
+# hardware-specific behavior or timing, so it complements real-GPU testing and
+# does not replace it. Not run: the Tensor Core examples (matmul 08 to 11),
+# compute-sanitizer tests and the PyTorch extension.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**.cu"
+      - "**.cuh"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    name: Examples (CUDA 13.0 and simulated H100)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      # library-path is disabled so that the toolkit's cuBLAS and cuSPARSE are
+      # the ones the examples link against and load.
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@656f502ef4782d94d34d8ddd368e333960609639 # v0.1.8
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+          library-path: 'false'
+
+      - name: Install ccache
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ccache
+
+      - name: Restore ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-gpu-sim-${{ github.sha }}
+          restore-keys: |
+            ccache-gpu-sim-
+
+      # 90-virtual embeds PTX only, which the simulator runs. The simulator
+      # needs a shared CUDA runtime.
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc \
+            -DCUDAToolkit_ROOT=/usr/local/cuda-13.0 \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_ARCHITECTURES=90-virtual \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared
+
+      # Every example except the Tensor Core ones (matmul 08 to 11: WMMA,
+      # mma.sync and Hopper wgmma/TMA).
+      - name: Build
+        run: |
+          targets=$(ctest --test-dir build -N -L '^run$' \
+            | sed -n 's/^ *Test *#[0-9]*: //p' \
+            | grep -vE '^matmul-(08|09|10|11)_')
+          echo "$targets" | wc -l
+          ccache -z
+          cmake --build build -j3 --target $targets
+          ccache -s
+
+      # Fail the job if the simulated device is missing.
+      - name: Check the simulated device
+        run: |
+          vgpu run ./build/bin/basics/03_runtime_api_device_query | tee device.txt
+          grep -q "NVIDIA H100" device.txt
+
+      # Each example must exit 0 and end with PASS. An example that prints
+      # SKIP (exit 77) or anything else counts as a failure, so nothing is
+      # silently skipped. basics/00 to 03 only print and have no verdict.
+      - name: Run examples
+        run: |
+          pass=0; failed=""
+          for exe in build/bin/*/*; do
+            name=${exe#build/bin/}
+            echo "::group::$name"
+            rc=0
+            out=$(timeout -s KILL 900 vgpu run "$exe" --quick 2>&1) || rc=$?
+            echo "$out" | tail -n 15
+            echo "::endgroup::"
+            case "$name" in
+              basics/00_*|basics/01_*|basics/03_*) ok=$([ $rc -eq 0 ] && echo 1) ;;
+              *) ok=$([ $rc -eq 0 ] && [ "$(echo "$out" | tail -n 1)" = PASS ] && echo 1) ;;
+            esac
+            if [ -n "$ok" ]; then pass=$((pass+1)); else failed="$failed $name(rc=$rc)"; fi
+          done
+          echo "passed=$pass failed:${failed:- none}"
+          [ "$pass" -ge 85 ] && [ -z "$failed" ]
